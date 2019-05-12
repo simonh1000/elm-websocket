@@ -1,0 +1,12 @@
+.DS_Store
+.ignore
+.idea
+node_modules
+
+# elm-package generated files
+elm-stuff/
+dist
+package-lock.json
+
+evan
+example
