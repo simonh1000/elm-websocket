@@ -45,7 +45,7 @@ listen wrapper (State { sockets }) =
     fromJs fn
 
 
-send : String -> String -> State msg -> ( State msg, Cmd msg )
+send : String -> String -> State msg -> ( State msg, Cmd Msg )
 send url message (State model) =
     case Dict.get url model.sockets of
         Just (Connected _ socket) ->
@@ -77,7 +77,7 @@ init =
         }
 
 
-setSockets : List ( String, String -> msg ) -> State msg -> ( State msg, Cmd msg )
+setSockets : List ( String, String -> msg ) -> State msg -> ( State msg, Cmd Msg )
 setSockets urls (State model) =
     let
         handleUrl ( url, constructor ) ( accSockets, accCmds ) =
@@ -132,17 +132,11 @@ type alias QueuesDict =
 
 
 type Msg
-    = GoodOpen String WS.WebSocket
+    = GoodOpen ( String, WS.WebSocket )
     | ConfirmSend String -- url
     | BadOpen String
     | SocketClose CloseConfirmation
     | WSError String
-
-
-
---    Receive String Value
---    | Open String -- url
---    | | Die String
 
 
 update : Msg -> State msg -> ( State msg, Cmd Msg )
@@ -153,7 +147,7 @@ update msg (State model) =
 update_ : Msg -> Model msg -> ( Model msg, Cmd Msg )
 update_ msg model =
     case msg of
-        GoodOpen url socket ->
+        GoodOpen ( url, socket ) ->
             case Dict.get url model.sockets of
                 Just (Opening constructor _) ->
                     ( { model | sockets = Dict.insert url (Connected constructor socket) model.sockets }
@@ -230,35 +224,24 @@ mkSend socket url message =
 
 
 toMsg tag payload =
+    let
+        handler dec msg =
+            Decode.decodeValue dec payload
+                |> Result.map msg
+                |> recover (Decode.errorToString >> WSError)
+    in
     case tag of
         "GoodOpen" ->
-            case Decode.decodeValue decodeOpenSuccess payload of
-                Ok ( url, socket ) ->
-                    GoodOpen url socket
-
-                Err err ->
-                    WSError <| Decode.errorToString err
+            handler decodeOpenSuccess GoodOpen
 
         "BadOpen" ->
-            case Decode.decodeValue Decode.string payload of
-                Ok message ->
-                    BadOpen message
-
-                Err err ->
-                    WSError <| Decode.errorToString err
+            handler Decode.string BadOpen
 
         "ConfirmSend" ->
-            case Decode.decodeValue decodeUrl payload of
-                Ok url ->
-                    ConfirmSend url
-
-                Err err ->
-                    WSError <| Decode.errorToString err
+            handler decodeUrl ConfirmSend
 
         "SocketClose" ->
-            Decode.decodeValue decodeClose payload
-                |> Result.map SocketClose
-                |> recover (Decode.errorToString >> WSError)
+            handler decodeClose SocketClose
 
         _ ->
             Debug.todo tag
