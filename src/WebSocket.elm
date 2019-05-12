@@ -1,10 +1,46 @@
-port module WebSocket exposing (Msg, State, init, listen, send, setSockets, update)
+module WebSocket exposing (Msg, PortMsg, State, init, listen, send, setSockets, update)
 
 import Dict exposing (Dict)
 import Json.Decode as Decode exposing (Decoder, Value)
 import Json.Encode as Encode
 import Process
-import WebSocket.LowLevel as WS
+
+
+type State msg
+    = State (Model msg)
+
+
+type alias Model msg =
+    { sockets : SocketsDict msg
+    , queues : QueuesDict
+    , toJs : PortMsg -> Cmd Msg
+    }
+
+
+type alias SocketsDict msg =
+    Dict String (Connection msg)
+
+
+type Connection msg
+    = Opening (String -> msg) Int
+      --    = Opening Int Process.Id -- backoff, backoffID
+    | Connected (String -> msg) WebSocket
+
+
+type alias QueuesDict =
+    Dict String (List String)
+
+
+init toJs =
+    State
+        { sockets = Dict.empty
+        , queues = Dict.empty
+        , toJs = toJs
+        }
+
+
+type alias WebSocket =
+    Decode.Value
 
 
 type alias PortMsg =
@@ -13,18 +49,12 @@ type alias PortMsg =
     }
 
 
-port toJs : PortMsg -> Cmd msg
-
-
-port fromJs : (PortMsg -> msg) -> Sub msg
-
-
 
 --
 
 
-listen : (Msg -> msg) -> State msg -> Sub msg
-listen wrapper (State { sockets }) =
+listen : (Msg -> msg) -> State msg -> ((PortMsg -> msg) -> Sub msg) -> Sub msg
+listen wrapper (State { sockets }) fromJs =
     let
         fn pmsg =
             case Dict.get pmsg.tag sockets of
@@ -50,7 +80,7 @@ send url message (State model) =
     case Dict.get url model.sockets of
         Just (Connected _ socket) ->
             ( State model
-            , mkSend socket url message
+            , model.toJs <| mkSend socket url message
             )
 
         Just (Opening _ _) ->
@@ -58,23 +88,12 @@ send url message (State model) =
 
         Nothing ->
             ( State { model | queues = Dict.insert url [ message ] model.queues }
-            , toJs { tag = "open", payload = Encode.string url }
+            , model.toJs { tag = "open", payload = Encode.string url }
             )
 
 
 
 --
-
-
-type State msg
-    = State (Model msg)
-
-
-init =
-    State
-        { sockets = Dict.empty
-        , queues = Dict.empty
-        }
 
 
 setSockets : List ( String, String -> msg ) -> State msg -> ( State msg, Cmd Msg )
@@ -86,7 +105,9 @@ setSockets urls (State model) =
                     ( accSockets, accCmds )
 
                 Nothing ->
-                    ( Dict.insert url (Opening constructor 0) accSockets, toJs { tag = "open", payload = Encode.string url } :: accCmds )
+                    ( Dict.insert url (Opening constructor 0) accSockets
+                    , model.toJs { tag = "open", payload = Encode.string url } :: accCmds
+                    )
 
         ( sockets, addCmds ) =
             List.foldl handleUrl ( model.sockets, [] ) urls
@@ -96,7 +117,7 @@ setSockets urls (State model) =
                 go _ v acc =
                     case v of
                         Connected _ socket ->
-                            toJs { tag = "close", payload = Encode.object [ ( "socket", socket ) ] } :: acc
+                            model.toJs { tag = "close", payload = Encode.object [ ( "socket", socket ) ] } :: acc
 
                         _ ->
                             acc
@@ -107,32 +128,12 @@ setSockets urls (State model) =
     ( State { model | sockets = sockets }, Cmd.batch <| closeCmds ++ addCmds )
 
 
-type alias Model msg =
-    { sockets : SocketsDict msg
-    , queues : QueuesDict
-    }
-
-
-type alias SocketsDict msg =
-    Dict String (Connection msg)
-
-
-type Connection msg
-    = Opening (String -> msg) Int
-      --    = Opening Int Process.Id -- backoff, backoffID
-    | Connected (String -> msg) WS.WebSocket
-
-
-type alias QueuesDict =
-    Dict String (List String)
-
-
 
 -- UPDATE
 
 
 type Msg
-    = GoodOpen ( String, WS.WebSocket )
+    = GoodOpen ( String, WebSocket )
     | ConfirmSend String -- url
     | BadOpen String
     | SocketClose CloseConfirmation
@@ -153,7 +154,7 @@ update_ msg model =
                     ( { model | sockets = Dict.insert url (Connected constructor socket) model.sockets }
                     , model.queues
                         |> getNextForUrl url
-                        |> Maybe.map (mkSend socket url)
+                        |> Maybe.map (mkSend socket url >> model.toJs)
                         |> Maybe.withDefault Cmd.none
                     )
 
@@ -183,7 +184,8 @@ update_ msg model =
             ( newModel
             , newModel.queues
                 |> getNextForUrl url
-                |> Maybe.map (mkSendCmd newModel.sockets url)
+                |> Maybe.andThen (mkSendCmd newModel.sockets url)
+                |> Maybe.map model.toJs
                 |> Maybe.withDefault Cmd.none
             )
 
@@ -200,27 +202,26 @@ getNextForUrl url queues =
     Dict.get url queues |> Maybe.andThen List.head
 
 
-mkSendCmd : SocketsDict msg -> String -> String -> Cmd Msg
+mkSendCmd : SocketsDict msg -> String -> String -> Maybe PortMsg
 mkSendCmd sockets url message =
     case Dict.get url sockets of
         Just (Connected _ socket) ->
-            mkSend socket url message
+            Just <| mkSend socket url message
 
         _ ->
-            Cmd.none
+            Nothing
 
 
-mkSend : WS.WebSocket -> String -> String -> Cmd msg
+mkSend : WebSocket -> String -> String -> PortMsg
 mkSend socket url message =
-    toJs
-        { tag = "send"
-        , payload =
-            Encode.object
-                [ ( "socket", socket )
-                , ( "url", Encode.string url )
-                , ( "message", Encode.string message )
-                ]
-        }
+    { tag = "send"
+    , payload =
+        Encode.object
+            [ ( "socket", socket )
+            , ( "url", Encode.string url )
+            , ( "message", Encode.string message )
+            ]
+    }
 
 
 toMsg tag payload =
@@ -257,13 +258,13 @@ type alias CloseConfirmation =
 
 decodeClose =
     Decode.map4 CloseConfirmation
-        (Decode.field "url" Decode.string)
+        decodeUrl
         (Decode.field "code" Decode.int)
         (Decode.field "reason" Decode.string)
         (Decode.field "wasClean" Decode.bool)
 
 
-decodeOpenSuccess : Decoder ( String, WS.WebSocket )
+decodeOpenSuccess : Decoder ( String, WebSocket )
 decodeOpenSuccess =
     Decode.map2 Tuple.pair
         decodeUrl
