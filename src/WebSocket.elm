@@ -4,6 +4,7 @@ import Dict exposing (Dict)
 import Json.Decode as Decode exposing (Decoder, Value)
 import Json.Encode as Encode
 import Process
+import Task
 
 
 type State msg
@@ -22,7 +23,7 @@ type alias SocketsDict msg =
 
 
 type Connection msg
-    = Opening (String -> msg) Int
+    = Opening (String -> msg) Float
       --    = Opening Int Process.Id -- backoff, backoffID
     | Connected (String -> msg) WebSocket
 
@@ -88,8 +89,12 @@ send url message (State model) =
 
         Nothing ->
             ( State { model | queues = Dict.insert url [ message ] model.queues }
-            , model.toJs { tag = "open", payload = Encode.string url }
+            , tryOpen model url
             )
+
+
+tryOpen model url =
+    model.toJs { tag = "open", payload = Encode.string url }
 
 
 
@@ -134,10 +139,13 @@ setSockets urls (State model) =
 
 type Msg
     = GoodOpen ( String, WebSocket )
-    | ConfirmSend String -- url
-    | BadOpen String
+    | BadOpen ( String, String )
+    | SocketError ( String, Int ) -- url, readyState
+    | TryOpen String -- url
+    | GoodSend String -- url
+    | BadSend ( String, String )
     | SocketClose CloseConfirmation
-    | WSError String
+    | DecodeError String
 
 
 update : Msg -> State msg -> ( State msg, Cmd Msg )
@@ -161,17 +169,40 @@ update_ msg model =
                 _ ->
                     Debug.todo "GoodOpen"
 
-        BadOpen val ->
-            let
-                _ =
-                    Debug.log "BadOpen" val
-            in
-            ( model, Cmd.none )
+        --        BadOpen ( url, error ) ->
+        --            case Dict.get url model.sockets of
+        --                Just (Opening constructor backoff) ->
+        --                    ( { model | sockets = Dict.insert url (Opening constructor <| 2 * backoff) model.sockets }
+        --                    , Process.sleep backoff |> Task.perform (\_ -> TryOpen url)
+        --                    )
+        --
+        --                _ ->
+        --                    let
+        --                        _ =
+        --                            Debug.log url error
+        --                    in
+        --                    ( model, Cmd.none )
+        TryOpen url ->
+            ( model, tryOpen model url )
+
+        SocketError ( url, error ) ->
+            case Dict.get url model.sockets of
+                Just (Opening constructor backoff) ->
+                    ( { model | sockets = Dict.insert url (Opening constructor <| 2 * backoff) model.sockets }
+                    , Process.sleep backoff |> Task.perform (\_ -> TryOpen url)
+                    )
+
+                _ ->
+                    let
+                        _ =
+                            Debug.log url error
+                    in
+                    ( model, Cmd.none )
 
         SocketClose { url } ->
             ( { model | sockets = Dict.remove url model.sockets }, Cmd.none )
 
-        ConfirmSend url ->
+        GoodSend url ->
             let
                 newModel =
                     case Dict.get url model.queues of
@@ -229,20 +260,26 @@ toMsg tag payload =
         handler dec msg =
             Decode.decodeValue dec payload
                 |> Result.map msg
-                |> recover (Decode.errorToString >> WSError)
+                |> recover (Decode.errorToString >> DecodeError)
     in
     case tag of
         "GoodOpen" ->
-            handler decodeOpenSuccess GoodOpen
+            handler decodeGoodOpen GoodOpen
 
         "BadOpen" ->
-            handler Decode.string BadOpen
+            handler decodeBadAction BadOpen
 
-        "ConfirmSend" ->
-            handler decodeUrl ConfirmSend
+        "GoodSend" ->
+            handler decodeUrl GoodSend
 
-        "SocketClose" ->
+        "BadSend" ->
+            handler decodeBadAction BadSend
+
+        "close" ->
             handler decodeClose SocketClose
+
+        "error" ->
+            handler decodeError SocketError
 
         _ ->
             Debug.todo tag
@@ -264,11 +301,21 @@ decodeClose =
         (Decode.field "wasClean" Decode.bool)
 
 
-decodeOpenSuccess : Decoder ( String, WebSocket )
-decodeOpenSuccess =
+decodeGoodOpen : Decoder ( String, WebSocket )
+decodeGoodOpen =
     Decode.map2 Tuple.pair
         decodeUrl
         (Decode.field "socket" Decode.value)
+
+
+decodeBadAction : Decoder ( String, String )
+decodeBadAction =
+    Decode.map2 Tuple.pair decodeUrl (Decode.field "error" Decode.string)
+
+
+decodeError : Decoder ( String, Int )
+decodeError =
+    Decode.map2 Tuple.pair decodeUrl (Decode.field "readyState" Decode.int)
 
 
 decodeUrl =

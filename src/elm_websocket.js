@@ -5,6 +5,7 @@ const __WS_BadArgs = "BadArgs";
 const __WS_BadReason = "BadReason";
 const __WS_BadCode = "BadCode";
 const __WS_NotOpen = "NotOpen";
+const __WS_BadString = "BadString";
 
 export function _WebSocket_handler(data, cb) {
     switch (data.tag) {
@@ -33,8 +34,10 @@ function _WebSocket_open(url, callback) {
         console.log(err);
         return callback({
             tag: "BadOpen",
-            payload:
-                err.name === "SecurityError" ? __WS_BadSecurity : __WS_BadArgs
+            payload: {
+                url,
+                error: err.name === "SecurityError" ? __WS_BadSecurity : __WS_BadArgs
+            }
         });
     }
 
@@ -46,20 +49,22 @@ function _WebSocket_open(url, callback) {
         callback({ tag: url, payload: event.data });
     });
 
-    socket.onerror = function(event) {
+    socket.addEventListener("error", function(event) {
         console.log(event);
-        event.preventDefault();
-    };
-    //    socket.addEventListener("error", function(event) {
-    //        console.log(event);
-    //        event.preventDefault();
-    //    });
+        callback({
+            tag: "error",
+            payload: {
+                url,
+                readyState: event.target.readyState
+            }
+        });
+    });
 
     socket.addEventListener("close", function(event) {
         callback({
-            tag: "SocketClose",
+            tag: "close",
             payload: {
-                url: url,
+                url,
                 code: event.code,
                 reason: event.reason,
                 wasClean: event.wasClean
@@ -69,13 +74,21 @@ function _WebSocket_open(url, callback) {
 }
 
 function _WebSocket_send({ socket, url, message }, callback) {
-    var tag =
-        socket.readyState === WebSocket.OPEN ? "ConfirmSend" : __WS_NotOpen;
+    var resp = {tag: "GoodSend", payload: {url: url}}
+
+    if (socket.readyState !== WebSocket.OPEN) {
+        resp.tag = "BadSend";
+        resp.payload.reason = __WS_NotOpen;
+        return callback(resp);
+    }
 
     try {
         socket.send(message);
+        return callback(resp);
     } catch (err) {
-        tag = "BadString";
+        resp.tag = "BadSend";
+        resp.payload.reason = __WS_BadString;
+        return callback(resp);
     }
 
     callback({ tag, payload: { url } });
