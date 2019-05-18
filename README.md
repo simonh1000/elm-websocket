@@ -1,5 +1,77 @@
+# Websockets
+
+Aim: to reproduce as closely as possible the API of the 0.18 library.
+
+Because of the need to use Ports, the amount of boilerplate is much higher.
+
+## Installation
+
+1) Define ports
+
+    ```
+    port fromJs : (WebSocket.PortMsg -> msg) -> Sub msg
+    port toJs : WebSocket.PortMsg -> Cmd msg
+    ```
+    
+    The names do not matter, as you will have to wire them up anyway
+
+2) Add `WebSocket.State msg` to Model
+
+    ```
+    type alias Model =
+        { ws : WebSocket.State Msg
+        , ...
+        }
+    ```
+
+3) Add a `Msg` to wrap `WebSocket.Msg`
+
+    ```
+    type Msg
+        = WSMsg WebSocet.Msg
+        | ...
+
+    ```
+    
+4) Connect subscriptions 
+
+    ```
+    Browser.document
+        { subscriptions = \m -> fromJs <| WebSocket.listen WSMsg m.ws
+        , ...
+        }
+    ```
+
+5) Wire up the update function
+
+    ```elm
+    WSMsg msg ->
+        WebSocket.update msg model.ws
+           |> \(ws, cmd) -> ({ model | ws = ws }, Cmd.map WSMsg cmd )     
+    ```
+        
+6) Open some sockets!
+
+    ```
+    WebSocket.setSockets [ ( url, OnEcho ) ] model.ws
+        |> \(ws, cmd) -> ( { model | ws = ws }, Cmd.map WSMsg cmd )
+    ``` 
+
+7) [Javascript] copy elm_websocket.js into project, and connect to app. For example,
+
+    ```js
+    import {_WebSocket_handler} from "./elm_websocket";
+    
+    const { Elm } = require("./Main");
+    var app = Elm.Main.init({ flags: null });
+    
+    app.ports.toJs.subscribe(data => {
+        _WebSocket_handler(data, app.ports.fromJs.send);
+    });
+    ```
 
 
+## Notes 
 Setting and unsetting sockets
 
 - 0.18 - the subscriptions chosen
