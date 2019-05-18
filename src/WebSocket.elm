@@ -76,7 +76,7 @@ setSockets selectedSockets (State model) =
                     ( Dict.insert url socket accSockets, accCmds )
 
                 Nothing ->
-                    -- add a new one
+                    -- this is a new socket, so we will need to open it
                     ( Dict.insert url ( msgRouter, Opening 0 ) accSockets
                     , model.toJs { tag = "open", payload = Encode.string url } :: accCmds
                     )
@@ -104,19 +104,28 @@ setSockets selectedSockets (State model) =
 
 send : String -> String -> State msg -> ( State msg, Cmd Msg )
 send url message (State model) =
+    let
+        newModel =
+            State <| addToQueue url message model
+    in
     case Dict.get url model.sockets of
         Just ( _, Connected socket ) ->
-            ( State model
-            , model.toJs <| mkSend socket url message
-            )
+            if model.queues |> Dict.get url |> Maybe.map List.length |> Maybe.withDefault 0 |> (<) 1 then
+                -- as there is nothing in the queue we will try to send immediately
+                ( newModel
+                , model.toJs <| mkSend socket url message
+                )
+
+            else
+                ( newModel, Cmd.none )
 
         Just ( _, Opening _ ) ->
-            ( State { model | queues = Dict.insert url [ message ] model.queues }, Cmd.none )
+            ( newModel, Cmd.none )
 
         Nothing ->
             -- there is no socket foreseen for url.
             -- We will queue the message pending reconnection
-            ( State { model | queues = Dict.insert url [ message ] model.queues }, Cmd.none )
+            ( newModel, Cmd.none )
 
 
 update : Msg -> State msg -> ( State msg, Cmd Msg )
@@ -124,6 +133,7 @@ update msg (State model) =
     update_ msg model |> Tuple.mapFirst State
 
 
+getStatus : String -> State msg -> ConnectionStatus
 getStatus url (State model) =
     case Dict.get url model.sockets of
         Just ( _, Connected _ ) ->
@@ -151,7 +161,7 @@ listen wrapper (State { sockets }) =
     \pmsg ->
         case Dict.get pmsg.tag sockets of
             Just ( msgRouter, Connected _ ) ->
-                case Decode.decodeValue Decode.string pmsg.payload of
+                case Debug.log "listen" <| Decode.decodeValue Decode.string pmsg.payload of
                     Ok str ->
                         -- deliver immediately to client
                         msgRouter str
@@ -179,7 +189,6 @@ type Msg
     | TryOpen String -- url
     | GoodSend String -- url
     | BadSend ( String, String )
-    | BadMessage String
     | DecodeError String
 
 
@@ -216,20 +225,13 @@ update_ msg model =
             ( model, tryOpen model url )
 
         SocketError ( url, error ) ->
-            --case Dict.get url model.sockets of
-            --    Just ( msgRouter, Opening backoff ) ->
-            --        ( { model | sockets = Dict.insert url ( msgRouter, Opening (Debug.log "backoff" <| 1 + backoff) ) model.sockets }
-            --        , Process.sleep (2000 * backoff) |> Task.perform (\_ -> TryOpen url)
-            --        )
-            --
-            --    _ ->
             let
                 _ =
                     Debug.log ("Error " ++ url) error
             in
             ( model, Cmd.none )
 
-        SocketClose ({ url } as res) ->
+        SocketClose { url } ->
             case Dict.get url model.sockets of
                 Just ( msgRouter, Opening backoff ) ->
                     ( { model | sockets = Dict.insert url ( msgRouter, Opening (Debug.log "backoff" <| 1 + backoff) ) model.sockets }
@@ -250,12 +252,7 @@ update_ msg model =
         GoodSend url ->
             let
                 newModel =
-                    case Dict.get url model.queues of
-                        Just (_ :: tl) ->
-                            { model | queues = Dict.insert url tl model.queues }
-
-                        _ ->
-                            model
+                    { model | queues = Dict.update url (Maybe.andThen List.tail) model.queues }
             in
             ( newModel
             , newModel.queues
@@ -301,6 +298,11 @@ update_ msg model =
 
 
 -- helpers
+
+
+addToQueue : String -> String -> Model msg -> Model msg
+addToQueue url msg model =
+    { model | queues = Dict.update url (\mbQueue -> Just <| (mbQueue |> Maybe.withDefault []) ++ [ msg ]) model.queues }
 
 
 getNextForUrl : String -> QueuesDict -> Maybe String
