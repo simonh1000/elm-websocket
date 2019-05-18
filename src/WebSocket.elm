@@ -157,7 +157,7 @@ listen wrapper (State { sockets }) =
                         msgRouter str
 
                     Err err ->
-                        wrapper <| BadMessage <| Decode.errorToString err
+                        wrapper <| DecodeError <| Decode.errorToString err
 
             Just other ->
                 -- a message from a socket thought to be closed!
@@ -216,37 +216,35 @@ update_ msg model =
             ( model, tryOpen model url )
 
         SocketError ( url, error ) ->
+            --case Dict.get url model.sockets of
+            --    Just ( msgRouter, Opening backoff ) ->
+            --        ( { model | sockets = Dict.insert url ( msgRouter, Opening (Debug.log "backoff" <| 1 + backoff) ) model.sockets }
+            --        , Process.sleep (2000 * backoff) |> Task.perform (\_ -> TryOpen url)
+            --        )
+            --
+            --    _ ->
+            let
+                _ =
+                    Debug.log ("Error " ++ url) error
+            in
+            ( model, Cmd.none )
+
+        SocketClose ({ url } as res) ->
             case Dict.get url model.sockets of
                 Just ( msgRouter, Opening backoff ) ->
                     ( { model | sockets = Dict.insert url ( msgRouter, Opening (Debug.log "backoff" <| 1 + backoff) ) model.sockets }
                     , Process.sleep (2000 * backoff) |> Task.perform (\_ -> TryOpen url)
                     )
 
-                _ ->
+                Just ( msgRouter, Connected _ ) ->
                     let
-                        _ =
-                            Debug.log url error
+                        m =
+                            { model | sockets = Dict.insert url ( msgRouter, Opening 0 ) model.sockets }
                     in
-                    ( model, Cmd.none )
-
-        SocketClose res ->
-            let
-                _ =
-                    Debug.log "SocketClose" res
-            in
-            --            ( { model | sockets = Dict.remove res.url model.sockets }, Cmd.none )
-            case Dict.get res.url model.sockets of
-                Just ( msgRouter, _ ) ->
-                    -- not clear what needs to be done hear as SocketError will have already fired?
-                    --                    let
-                    --                        m =
-                    --                            { model | sockets = Dict.insert res.url ( msgRouter, Opening 0 ) model.sockets }
-                    --                    in
-                    --                    ( m, tryOpen m res.url )
-                    ( model, Cmd.none )
+                    ( m, tryOpen m url )
 
                 Nothing ->
-                    -- user no longer wants this socket (they probably shut it themselves in fact)
+                    -- ignoring as user no longer cares about this socket
                     ( model, Cmd.none )
 
         GoodSend url ->
@@ -266,6 +264,32 @@ update_ msg model =
                 |> Maybe.map model.toJs
                 |> Maybe.withDefault Cmd.none
             )
+
+        BadSend ( url, reason ) ->
+            case Dict.get url model.sockets of
+                Just ( msgRouter, Opening backoff ) ->
+                    ( { model | sockets = Dict.insert url ( msgRouter, Opening (Debug.log "backoff" <| 1 + backoff) ) model.sockets }
+                    , Process.sleep (2000 * backoff) |> Task.perform (\_ -> TryOpen url)
+                    )
+
+                Just ( msgRouter, Connected _ ) ->
+                    if reason == "NotOpen" then
+                        let
+                            m =
+                                { model | sockets = Dict.insert url ( msgRouter, Opening 0 ) model.sockets }
+                        in
+                        ( m, tryOpen m url )
+
+                    else
+                        let
+                            _ =
+                                Debug.log "BadSend" reason
+                        in
+                        ( model, Cmd.none )
+
+                _ ->
+                    -- ignore as user no longer cares about this socket
+                    ( model, Cmd.none )
 
         _ ->
             let
@@ -328,7 +352,7 @@ toMsg tag payload =
             handler decodeUrl GoodSend
 
         "BadSend" ->
-            handler decodeBadAction BadSend
+            handler decodeBadSend BadSend
 
         "close" ->
             handler decodeClose SocketClose
@@ -366,6 +390,11 @@ decodeGoodOpen =
 decodeBadAction : Decoder ( String, String )
 decodeBadAction =
     Decode.map2 Tuple.pair decodeUrl (Decode.field "error" Decode.string)
+
+
+decodeBadSend : Decoder ( String, String )
+decodeBadSend =
+    Decode.map2 Tuple.pair decodeUrl (Decode.field "reason" Decode.string)
 
 
 decodeError : Decoder ( String, Int )

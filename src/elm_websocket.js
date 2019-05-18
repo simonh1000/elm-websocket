@@ -1,5 +1,8 @@
 //
 
+window.addEventListener("offline", () => console.log("offline"));
+window.addEventListener("online", () => console.log("online"));
+
 const __WS_BadSecurity = "BadSecurity";
 const __WS_BadArgs = "BadArgs";
 const __WS_BadReason = "BadReason";
@@ -86,12 +89,13 @@ function _WebSocket_send({ socket, url, message }, callback) {
         socket.send(message);
         return callback(resp);
     } catch (err) {
+        console.log("BadSend", err);
         resp.tag = "BadSend";
         resp.payload.reason = __WS_BadString;
         return callback(resp);
     }
 
-    callback({ tag, payload: { url } });
+//    callback({ tag, payload: { url } });
 }
 
 function _WebSocket_close ({ reason, socket }, callback) {
