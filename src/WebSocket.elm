@@ -7,15 +7,15 @@ import Process
 import Task
 
 
-type alias Model msg =
-    { sockets : SocketsDict msg
+type alias Model =
+    { sockets : SocketsDict
     , queues : QueuesDict
     , toJs : PortMsg -> Cmd Msg
     }
 
 
-type alias SocketsDict msg =
-    Dict String ( String -> msg, Connection )
+type alias SocketsDict =
+    Dict String Connection
 
 
 
@@ -46,13 +46,14 @@ type alias WebSocket =
 -- API
 
 
-type State msg
-    = State (Model msg)
+type State
+    = State Model
 
 
 type alias PortMsg =
     { tag : String
-    , payload : Value
+    , -- must be value as we passing through a socket as well as string data
+      payload : Value
     }
 
 
@@ -70,10 +71,10 @@ init toJs =
     - open those that we do no have
 
 -}
-setSockets : List ( String, String -> msg ) -> State msg -> ( State msg, Cmd Msg )
-setSockets selectedSockets (State model) =
+setSockets : List String -> State -> ( State, Cmd Msg )
+setSockets urls (State model) =
     let
-        handleUrl ( url, msgRouter ) ( accSockets, accCmds ) =
+        handleUrl url ( accSockets, accCmds ) =
             case Dict.get url model.sockets of
                 Just socket ->
                     -- copy across existing socket
@@ -81,25 +82,25 @@ setSockets selectedSockets (State model) =
 
                 Nothing ->
                     -- this is a new socket, so we will need to open it
-                    ( Dict.insert url ( msgRouter, Opening 0 ) accSockets
+                    ( Dict.insert url (Opening 0) accSockets
                     , { tag = "open", payload = Encode.string url } :: accCmds
                     )
 
         ( sockets, addCmds ) =
-            List.foldl handleUrl ( Dict.empty, [] ) selectedSockets
+            List.foldl handleUrl ( Dict.empty, [] ) urls
 
         closeCmds =
             let
                 go _ v acc =
                     case v of
-                        ( _, Connected socket ) ->
+                        Connected socket ->
                             { tag = "close", payload = Encode.object [ ( "socket", socket ) ] } :: acc
 
                         _ ->
                             acc
             in
             -- get list of all existing sockets that are no longer required
-            List.foldl (\( k, _ ) acc -> Dict.remove k acc) model.sockets selectedSockets
+            List.foldl (\k acc -> Dict.remove k acc) model.sockets urls
                 -- close each one
                 |> Dict.foldl go []
     in
@@ -108,15 +109,18 @@ setSockets selectedSockets (State model) =
     )
 
 
-send : String -> String -> State msg -> ( State msg, Cmd Msg )
+send : String -> String -> State -> ( State, Cmd Msg )
 send url message (State model) =
     let
+        queueLength =
+            model.queues |> Dict.get url |> Maybe.map List.length |> Maybe.withDefault 0
+
         newModel =
             State <| addToQueue url message model
     in
     case Dict.get url model.sockets of
-        Just ( _, Connected socket ) ->
-            if model.queues |> Dict.get url |> Maybe.map List.length |> Maybe.withDefault 0 |> (<) 1 then
+        Just (Connected socket) ->
+            if Debug.log "send" <| queueLength == 0 then
                 -- as there is nothing in the queue we will try to send immediately
                 ( newModel
                 , model.toJs <| mkSend socket url message
@@ -125,7 +129,7 @@ send url message (State model) =
             else
                 ( newModel, Cmd.none )
 
-        Just ( _, Opening _ ) ->
+        Just (Opening _) ->
             ( newModel, Cmd.none )
 
         Nothing ->
@@ -134,18 +138,18 @@ send url message (State model) =
             ( newModel, Cmd.none )
 
 
-update : Msg -> State msg -> ( State msg, Cmd Msg )
+update : Msg -> State -> ( State, Cmd Msg )
 update msg (State model) =
     update1 msg model |> Tuple.mapFirst State
 
 
-getStatus : String -> State msg -> ConnectionStatus
+getStatus : String -> State -> ConnectionStatus
 getStatus url (State model) =
     case Dict.get url model.sockets of
-        Just ( _, Connected _ ) ->
+        Just (Connected _) ->
             StatusConnected
 
-        Just ( _, Opening backoff ) ->
+        Just (Opening backoff) ->
             StatusOpening backoff
 
         Nothing ->
@@ -162,25 +166,44 @@ getStatus url (State model) =
     the routing messages for each socket are stored in state.sockets
 
 -}
-listen : (Msg -> msg) -> State msg -> (PortMsg -> msg)
-listen wrapper (State { sockets }) =
+
+
+
+--listen : (Msg -> msg) ->State -> (PortMsg -> msg)
+--listen wrapper (State { sockets }) =
+--    \pmsg ->
+--        case Dict.get pmsg.tag sockets of
+--            Just ( msgRouter, Connected _ ) ->
+--                case Debug.log "listen" <| Decode.decodeValue Decode.string pmsg.payload of
+--                    Ok str ->
+--                        -- deliver immediately to client
+--                        msgRouter str
+--
+--                    Err err ->
+--                        wrapper <| DecodeError <| Decode.errorToString err
+--
+--            Just other ->
+--                -- a message from a socket thought to be closed!
+--                Debug.todo <| Debug.toString other
+--
+--            Nothing ->
+--                wrapper <| convertIncomingMsg pmsg.tag pmsg.payload
+
+
+listen : Dict String (String -> msg) -> (Msg -> msg) -> (PortMsg -> msg)
+listen dict wsMsg =
     \pmsg ->
-        case Dict.get pmsg.tag sockets of
-            Just ( msgRouter, Connected _ ) ->
-                case Debug.log "listen" <| Decode.decodeValue Decode.string pmsg.payload of
+        case Dict.get pmsg.tag dict of
+            Just fn ->
+                case Decode.decodeValue Decode.string pmsg.payload of
                     Ok str ->
-                        -- deliver immediately to client
-                        msgRouter str
+                        fn str
 
                     Err err ->
-                        wrapper <| DecodeError <| Decode.errorToString err
-
-            Just other ->
-                -- a message from a socket thought to be closed!
-                Debug.todo <| Debug.toString other
+                        wsMsg <| DecodeError err
 
             Nothing ->
-                wrapper <| convertIncomingMsg pmsg.tag pmsg.payload
+                wsMsg <| convertIncomingMsg pmsg.tag pmsg.payload
 
 
 
@@ -195,23 +218,23 @@ type Msg
     | TryOpen String -- url
     | GoodSend String -- url
     | BadSend ( String, String )
-    | DecodeError String
+    | DecodeError Decode.Error
 
 
-update1 : Msg -> Model msg -> ( Model msg, Cmd Msg )
+update1 : Msg -> Model -> ( Model, Cmd Msg )
 update1 msg model =
     case msg of
         SocketClose { url } ->
             case Dict.get url model.sockets of
-                Just ( msgRouter, Opening backoff ) ->
-                    ( { model | sockets = Dict.insert url ( msgRouter, Opening (Debug.log "backoff" <| 1 + backoff) ) model.sockets }
+                Just (Opening backoff) ->
+                    ( { model | sockets = Dict.insert url (Opening (Debug.log "backoff" <| 1 + backoff)) model.sockets }
                     , Process.sleep (2000 * backoff) |> Task.perform (\_ -> TryOpen url)
                     )
 
-                Just ( msgRouter, Connected _ ) ->
+                Just (Connected _) ->
                     let
                         m =
-                            { model | sockets = Dict.insert url ( msgRouter, Opening 0 ) model.sockets }
+                            { model | sockets = Dict.insert url (Opening 0) model.sockets }
                     in
                     ( m, model.toJs <| mkOpenMsg url )
 
@@ -221,16 +244,16 @@ update1 msg model =
 
         BadSend ( url, reason ) ->
             case Dict.get url model.sockets of
-                Just ( msgRouter, Opening backoff ) ->
-                    ( { model | sockets = Dict.insert url ( msgRouter, Opening (Debug.log "backoff" <| 1 + backoff) ) model.sockets }
+                Just (Opening backoff) ->
+                    ( { model | sockets = Dict.insert url (Opening (Debug.log "backoff" <| 1 + backoff)) model.sockets }
                     , Process.sleep (2000 * backoff) |> Task.perform (\_ -> TryOpen url)
                     )
 
-                Just ( msgRouter, Connected _ ) ->
+                Just (Connected _) ->
                     if reason == "NotOpen" then
                         let
                             m =
-                                { model | sockets = Dict.insert url ( msgRouter, Opening 0 ) model.sockets }
+                                { model | sockets = Dict.insert url (Opening 0) model.sockets }
                         in
                         ( m, model.toJs <| mkOpenMsg url )
 
@@ -250,13 +273,13 @@ update1 msg model =
                 |> Tuple.mapSecond (Maybe.map model.toJs >> Maybe.withDefault Cmd.none)
 
 
-update2 : Msg -> Model msg -> ( Model msg, Maybe PortMsg )
+update2 : Msg -> Model -> ( Model, Maybe PortMsg )
 update2 msg model =
     case msg of
         GoodOpen ( url, socket ) ->
             case Dict.get url model.sockets of
-                Just ( msgRouter, Opening _ ) ->
-                    ( { model | sockets = Dict.insert url ( msgRouter, Connected socket ) model.sockets }
+                Just (Opening _) ->
+                    ( { model | sockets = Dict.insert url (Connected socket) model.sockets }
                     , model.queues
                         |> getNextForUrl url
                         |> Maybe.map (mkSend socket url)
@@ -316,7 +339,7 @@ mkOpenMsg url =
     { tag = "open", payload = Encode.string url }
 
 
-addToQueue : String -> String -> Model msg -> Model msg
+addToQueue : String -> String -> Model -> Model
 addToQueue url msg model =
     { model | queues = Dict.update url (\mbQueue -> Just <| (mbQueue |> Maybe.withDefault []) ++ [ msg ]) model.queues }
 
@@ -326,10 +349,10 @@ getNextForUrl url queues =
     Dict.get url queues |> Maybe.andThen List.head
 
 
-mkSendCmd : SocketsDict msg -> String -> String -> Maybe PortMsg
+mkSendCmd : SocketsDict -> String -> String -> Maybe PortMsg
 mkSendCmd sockets url message =
     case Dict.get url sockets of
-        Just ( _, Connected socket ) ->
+        Just (Connected socket) ->
             Just <| mkSend socket url message
 
         _ ->
@@ -357,7 +380,7 @@ convertIncomingMsg tag payload =
         handler dec msg =
             Decode.decodeValue dec payload
                 |> Result.map msg
-                |> recover (Decode.errorToString >> DecodeError)
+                |> recover DecodeError
     in
     case tag of
         "GoodOpen" ->
