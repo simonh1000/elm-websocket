@@ -223,20 +223,22 @@ type Msg
 
 update1 : Msg -> Model -> ( Model, Cmd Msg )
 update1 msg model =
+    let
+        addBackoff url backoff =
+            ( { model | sockets = Dict.insert url (Opening (1 + backoff)) model.sockets }
+            , Process.sleep (2000 * backoff) |> Task.perform (\_ -> TryOpen url)
+            )
+    in
     case msg of
         SocketClose { url } ->
             case Dict.get url model.sockets of
                 Just (Opening backoff) ->
-                    ( { model | sockets = Dict.insert url (Opening (Debug.log "backoff" <| 1 + backoff)) model.sockets }
-                    , Process.sleep (2000 * backoff) |> Task.perform (\_ -> TryOpen url)
-                    )
+                    addBackoff url backoff
 
                 Just (Connected _) ->
-                    let
-                        m =
-                            { model | sockets = Dict.insert url (Opening 0) model.sockets }
-                    in
-                    ( m, model.toJs <| mkOpenMsg url )
+                    ( { model | sockets = Dict.insert url (Opening 0) model.sockets }
+                    , model.toJs <| mkOpenMsg url
+                    )
 
                 Nothing ->
                     -- ignoring as user no longer cares about this socket
@@ -245,9 +247,7 @@ update1 msg model =
         BadSend ( url, reason ) ->
             case Dict.get url model.sockets of
                 Just (Opening backoff) ->
-                    ( { model | sockets = Dict.insert url (Opening (Debug.log "backoff" <| 1 + backoff)) model.sockets }
-                    , Process.sleep (2000 * backoff) |> Task.perform (\_ -> TryOpen url)
-                    )
+                    addBackoff url backoff
 
                 Just (Connected _) ->
                     if reason == "NotOpen" then
@@ -266,6 +266,18 @@ update1 msg model =
 
                 _ ->
                     -- ignore as user no longer cares about this socket
+                    ( model, Cmd.none )
+
+        BadOpen ( url, error ) ->
+            case Dict.get url model.sockets of
+                Just (Opening backoff) ->
+                    addBackoff url backoff
+
+                _ ->
+                    let
+                        _ =
+                            Debug.log url error
+                    in
                     ( model, Cmd.none )
 
         _ ->
@@ -288,19 +300,6 @@ update2 msg model =
                 _ ->
                     Debug.todo "GoodOpen"
 
-        --        BadOpen ( url, error ) ->
-        --            case Dict.get url model.sockets of
-        --                Just (Opening constructor backoff) ->
-        --                    ( { model | sockets = Dict.insert url (Opening constructor <| 2 * backoff) model.sockets }
-        --                    , Process.sleep backoff |> Task.perform (\_ -> TryOpen url)
-        --                    )
-        --
-        --                _ ->
-        --                    let
-        --                        _ =
-        --                            Debug.log url error
-        --                    in
-        --                    ( model, Cmd.none )
         TryOpen url ->
             ( model, Just <| mkOpenMsg url )
 

@@ -44,7 +44,7 @@ Because of the need to use Ports, the amount of boilerplate is much higher.
 
 5) Wire up the update function
 
-    ```elm
+    ```
     WSMsg msg ->
         WebSocket.update msg model.ws
            |> \(ws, cmd) -> ({ model | ws = ws }, Cmd.map WSMsg cmd )     
@@ -53,11 +53,11 @@ Because of the need to use Ports, the amount of boilerplate is much higher.
 6) Open some sockets!
 
     ```
-    WebSocket.setSockets [ ( url, OnEcho ) ] model.ws
+    WebSocket.setSockets [ "ws://echo.websocket.org" ] model.ws
         |> \(ws, cmd) -> ( { model | ws = ws }, Cmd.map WSMsg cmd )
     ``` 
 
-7) [Javascript] copy elm_websocket.js into project, and connect to app. For example,
+7) [Javascript] copy elm_websocket.js in to project, and connect to app. For example,
 
     ```js
     import {_WebSocket_handler} from "./elm_websocket";
@@ -71,7 +71,8 @@ Because of the need to use Ports, the amount of boilerplate is much higher.
     ```
 
 
-## Notes 
+## Notes
+
 Setting and unsetting sockets
 
 - 0.18 - the subscriptions chosen

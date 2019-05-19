@@ -4,7 +4,7 @@ window.addEventListener("offline", () => console.log("offline"));
 window.addEventListener("online", () => console.log("online"));
 
 const __WS_BadSecurity = "BadSecurity";
-const __WS_BadArgs = "BadArgs";
+const __WS_BadArgs = "BadArgs"; // e.g. the url does not host a socket server
 const __WS_BadReason = "BadReason";
 const __WS_BadCode = "BadCode";
 const __WS_NotOpen = "NotOpen";
@@ -34,7 +34,6 @@ function _WebSocket_open(url, callback) {
     try {
         socket = new WebSocket(url);
     } catch (err) {
-        console.log(err);
         return callback({
             tag: "BadOpen",
             payload: {
@@ -53,7 +52,7 @@ function _WebSocket_open(url, callback) {
     });
 
     socket.addEventListener("error", function(event) {
-        console.log(event);
+        console.log("Error", event);
         callback({
             tag: "error",
             payload: {
