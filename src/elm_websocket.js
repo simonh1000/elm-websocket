@@ -80,7 +80,7 @@ function _WebSocket_send({ socket, url, message }, callback) {
 
     if (socket.readyState !== WebSocket.OPEN) {
         resp.tag = "BadSend";
-        resp.payload.reason = __WS_NotOpen;
+        resp.payload.error = __WS_NotOpen;
         return callback(resp);
     }
 
@@ -90,7 +90,7 @@ function _WebSocket_send({ socket, url, message }, callback) {
     } catch (err) {
         console.log("BadSend", err);
         resp.tag = "BadSend";
-        resp.payload.reason = __WS_BadString;
+        resp.payload.error = __WS_BadString;
         return callback(resp);
     }
 

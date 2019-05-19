@@ -18,10 +18,6 @@ type alias SocketsDict =
     Dict String Connection
 
 
-
--- (subscription handler, connection)
-
-
 type Connection
     = Opening Float --  backoff
       --    = Opening  Float Process.Id -- routingMsg, backoff, id (so that we can kill if user no longer wants this socket)
@@ -52,7 +48,7 @@ type State
 
 type alias PortMsg =
     { tag : String
-    , -- must be value as we passing through a socket as well as string data
+    , -- must be Value as we passing sockets, as well as string data
       payload : Value
     }
 
@@ -160,36 +156,13 @@ getStatus url (State model) =
 -- Subscriptions
 
 
-{-|
+{-| Instead of listening to each message individually, we need to pass in all the options as a Dictionary
+and as the WebSocket.Msg wrapper
 
     wrapper is the message to route to this library's update function
     the routing messages for each socket are stored in state.sockets
 
 -}
-
-
-
---listen : (Msg -> msg) ->State -> (PortMsg -> msg)
---listen wrapper (State { sockets }) =
---    \pmsg ->
---        case Dict.get pmsg.tag sockets of
---            Just ( msgRouter, Connected _ ) ->
---                case Debug.log "listen" <| Decode.decodeValue Decode.string pmsg.payload of
---                    Ok str ->
---                        -- deliver immediately to client
---                        msgRouter str
---
---                    Err err ->
---                        wrapper <| DecodeError <| Decode.errorToString err
---
---            Just other ->
---                -- a message from a socket thought to be closed!
---                Debug.todo <| Debug.toString other
---
---            Nothing ->
---                wrapper <| convertIncomingMsg pmsg.tag pmsg.payload
-
-
 listen : Dict String (String -> msg) -> (Msg -> msg) -> (PortMsg -> msg)
 listen dict wsMsg =
     \pmsg ->
@@ -271,91 +244,80 @@ update1 msg model =
         BadOpen ( url, error ) ->
             case Dict.get url model.sockets of
                 Just (Opening backoff) ->
+                    let
+                        _ =
+                            Debug.log "BadOpen" error
+                    in
                     addBackoff url backoff
 
                 _ ->
-                    let
-                        _ =
-                            Debug.log url error
-                    in
+                    -- ignore as user no longer cares about this socket
                     ( model, Cmd.none )
 
-        _ ->
-            update2 msg model
-                |> Tuple.mapSecond (Maybe.map model.toJs >> Maybe.withDefault Cmd.none)
-
-
-update2 : Msg -> Model -> ( Model, Maybe PortMsg )
-update2 msg model =
-    case msg of
-        GoodOpen ( url, socket ) ->
-            case Dict.get url model.sockets of
-                Just (Opening _) ->
-                    ( { model | sockets = Dict.insert url (Connected socket) model.sockets }
-                    , model.queues
-                        |> getNextForUrl url
-                        |> Maybe.map (mkSend socket url)
-                    )
-
-                _ ->
-                    Debug.todo "GoodOpen"
-
         TryOpen url ->
-            ( model, Just <| mkOpenMsg url )
+            ( model, model.toJs <| mkOpenMsg url )
+
+        GoodOpen ( url, socket ) ->
+            let
+                newModel =
+                    { model | sockets = Dict.insert url (Connected socket) model.sockets }
+            in
+            ( newModel, mkSendCmd newModel url )
 
         GoodSend url ->
             let
                 newModel =
                     { model | queues = Dict.update url (Maybe.andThen List.tail) model.queues }
             in
-            ( newModel
-            , newModel.queues
-                |> getNextForUrl url
-                |> Maybe.andThen (mkSendCmd newModel.sockets url)
-            )
+            ( newModel, mkSendCmd newModel url )
 
         SocketError ( url, error ) ->
             let
                 _ =
                     Debug.log ("Error " ++ url) error
             in
-            ( model, Nothing )
+            ( model, Cmd.none )
 
-        _ ->
+        DecodeError err ->
             let
                 _ =
-                    Debug.log "unhandled" msg
+                    Debug.log "decode error" <| Decode.errorToString err
             in
-            ( model, Nothing )
+            ( model, Cmd.none )
 
 
 
 -- helpers (outgoing)
 
 
-mkOpenMsg : String -> PortMsg
-mkOpenMsg url =
-    { tag = "open", payload = Encode.string url }
-
-
+{-| Appends to existing queue or creates new one if needed
+-}
 addToQueue : String -> String -> Model -> Model
 addToQueue url msg model =
     { model | queues = Dict.update url (\mbQueue -> Just <| (mbQueue |> Maybe.withDefault []) ++ [ msg ]) model.queues }
 
 
-getNextForUrl : String -> QueuesDict -> Maybe String
-getNextForUrl url queues =
+mkSendCmd : Model -> String -> Cmd Msg
+mkSendCmd model url =
+    case Dict.get url model.sockets of
+        Just (Connected socket) ->
+            model.queues
+                |> getNextMsg url
+                |> Maybe.map (mkSend socket url >> model.toJs)
+                |> Maybe.withDefault Cmd.none
+
+        _ ->
+            Cmd.none
+
+
+getNextMsg : String -> QueuesDict -> Maybe String
+getNextMsg url queues =
     Dict.get url queues |> Maybe.andThen List.head
 
 
-mkSendCmd : SocketsDict -> String -> String -> Maybe PortMsg
-mkSendCmd sockets url message =
-    case Dict.get url sockets of
-        Just (Connected socket) ->
-            Just <| mkSend socket url message
-
-        _ ->
-            Nothing
+mkOpenMsg : String -> PortMsg
+mkOpenMsg url =
+    { tag = "open", payload = Encode.string url }
 
 
 mkSend : WebSocket -> String -> String -> PortMsg
@@ -392,7 +354,7 @@ convertIncomingMsg tag payload =
             handler decodeUrl GoodSend
 
         "BadSend" ->
-            handler decodeBadSend BadSend
+            handler decodeBadAction BadSend
 
         "close" ->
             handler decodeClose SocketClose
@@ -432,18 +394,18 @@ decodeBadAction =
     Decode.map2 Tuple.pair decodeUrl (Decode.field "error" Decode.string)
 
 
-decodeBadSend : Decoder ( String, String )
-decodeBadSend =
-    Decode.map2 Tuple.pair decodeUrl (Decode.field "reason" Decode.string)
-
-
 decodeError : Decoder ( String, Int )
 decodeError =
     Decode.map2 Tuple.pair decodeUrl (Decode.field "readyState" Decode.int)
 
 
+decodeUrl : Decoder String
 decodeUrl =
     Decode.field "url" Decode.string
+
+
+
+--
 
 
 recover : (a -> b) -> Result a b -> b
