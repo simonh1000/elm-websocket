@@ -28,21 +28,12 @@ Because of the need to use Ports, the amount of boilerplate is much higher.
 
     ```
     type Msg
-        = WSMsg WebSocet.Msg
+        = WSMsg WebSocket.Msg
         | ...
 
     ```
     
-4) Connect subscriptions 
-
-    ```
-    Browser.document
-        { subscriptions = \m -> fromJs <| WebSocket.listen WSMsg m.ws
-        , ...
-        }
-    ```
-
-5) Wire up the update function
+4) Wire up the update function
 
     ```
     WSMsg msg ->
@@ -50,10 +41,22 @@ Because of the need to use Ports, the amount of boilerplate is much higher.
            |> \(ws, cmd) -> ({ model | ws = ws }, Cmd.map WSMsg cmd )     
     ```
         
+5) Connect subscriptions 
+
+    ```
+    listeners =
+        Dict.singleton "ws://echo.websocket.org" OnEcho
+        
+    Browser.document
+        { subscriptions = \_ -> fromJs <| WebSocket.listen listeners WSMsg
+        , ...
+        }
+    ```
+
 6) Open some sockets!
 
     ```
-    WebSocket.setSockets [ "ws://echo.websocket.org" ] model.ws
+    WebSocket.setSockets (Dict.keys listeners) model.ws
         |> \(ws, cmd) -> ( { model | ws = ws }, Cmd.map WSMsg cmd )
     ``` 
 
@@ -65,9 +68,7 @@ Because of the need to use Ports, the amount of boilerplate is much higher.
     const { Elm } = require("./Main");
     var app = Elm.Main.init({ flags: null });
     
-    app.ports.toJs.subscribe(data => {
-        _WebSocket_handler(data, app.ports.fromJs.send);
-    });
+    app.ports.toJs.subscribe(data => _WebSocket_handler(data, app.ports.fromJs.send);
     ```
 
 

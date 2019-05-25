@@ -27,21 +27,17 @@ type alias Model =
     }
 
 
-init : Int -> ( Model, Cmd Msg )
-init flags =
+init : () -> ( Model, Cmd Msg )
+init _ =
     ( { ws = WebSocket.init toJs, message = "", count = 1 }, Cmd.none )
 
 
 url =
-    "ws://echo.websocket.org"
+    "wss://echo.websocket.org"
 
 
 listeners =
     Dict.singleton url OnEcho
-
-
-connect =
-    handleSocket (WebSocket.setSockets [ url ])
 
 
 
@@ -60,7 +56,7 @@ type Msg
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update message model =
-    case Debug.log "update" message of
+    case message of
         OnEcho str ->
             ( { model | message = str }, Cmd.none )
 
@@ -68,7 +64,7 @@ update message model =
             handleSocket (WebSocket.setSockets []) model
 
         Connect ->
-            connect model
+            handleSocket (WebSocket.setSockets <| Dict.keys listeners) model
 
         Send ->
             handleSocket (WebSocket.send url <| "message: " ++ String.fromInt model.count)
@@ -112,7 +108,7 @@ view model =
 -- ---------------------------
 
 
-main : Program Int Model Msg
+main : Program () Model Msg
 main =
     Browser.document
         { init = init
@@ -122,5 +118,5 @@ main =
                 { title = "Elm 0.19 starter"
                 , body = [ view m ]
                 }
-        , subscriptions = \m -> fromJs <| WebSocket.listen listeners WSMsg
+        , subscriptions = \_ -> fromJs <| WebSocket.listen listeners WSMsg
         }

@@ -1,4 +1,6 @@
-module WebSocket exposing (ConnectionStatus(..), Msg, PortMsg, State, getStatus, init, listen, send, setSockets, update)
+module WebSocket exposing (CloseConfirmation, CmdMsg(..), Connection(..), ConnectionStatus(..), Model, Msg(..), PortMsg, QueuesDict, SocketsDict, State(..), WebSocket, addToQueue, convertCmdMsg, convertFromPrivate, convertIncomingMsg, decodeBadAction, decodeClose, decodeError, decodeGoodOpen, decodeUrl, getNextMsg, getStatus, init, initModel, listen, mkCloseMsg, mkOpenMsg, mkSend, mkSendCmd, recover, send, send_, setSockets, setSockets_, update, update_)
+
+--module WebSocket exposing (ConnectionStatus(..), Msg, PortMsg, State, getStatus, init, listen, send, setSockets, update)
 
 import Dict exposing (Dict)
 import Json.Decode as Decode exposing (Decoder, Value)
@@ -7,45 +9,18 @@ import Process
 import Task
 
 
-type alias Model =
-    { sockets : SocketsDict
-    , queues : QueuesDict
-    , toJs : PortMsg -> Cmd Msg
-    }
+
+-- -------------------
+-- PUBLIC API
+-- -------------------
 
 
-type alias SocketsDict =
-    Dict String Connection
-
-
-type Connection
-    = Opening Float --  backoff
-      --    = Opening  Float Process.Id -- routingMsg, backoff, id (so that we can kill if user no longer wants this socket)
-    | Connected WebSocket -- routingMsg, socket
-
-
-type ConnectionStatus
-    = StatusOpening Float
-    | StatusConnected
-    | NoSocket
-
-
-type alias QueuesDict =
-    Dict String (List String)
-
-
-type alias WebSocket =
-    Decode.Value
-
-
-
--- API
-
-
+{-| -}
 type State
     = State Model
 
 
+{-| -}
 type alias PortMsg =
     { tag : String
     , -- must be Value as we passing sockets, as well as string data
@@ -53,12 +28,9 @@ type alias PortMsg =
     }
 
 
-init toJs =
-    State
-        { sockets = Dict.empty
-        , queues = Dict.empty
-        , toJs = toJs
-        }
+{-| -}
+init =
+    State << initModel
 
 
 {-| Client changes the socket they want to use
@@ -69,76 +41,22 @@ init toJs =
 -}
 setSockets : List String -> State -> ( State, Cmd Msg )
 setSockets urls (State model) =
-    let
-        handleUrl url ( accSockets, accCmds ) =
-            case Dict.get url model.sockets of
-                Just socket ->
-                    -- copy across existing socket
-                    ( Dict.insert url socket accSockets, accCmds )
-
-                Nothing ->
-                    -- this is a new socket, so we will need to open it
-                    ( Dict.insert url (Opening 0) accSockets
-                    , { tag = "open", payload = Encode.string url } :: accCmds
-                    )
-
-        ( sockets, addCmds ) =
-            List.foldl handleUrl ( Dict.empty, [] ) urls
-
-        closeCmds =
-            let
-                go _ v acc =
-                    case v of
-                        Connected socket ->
-                            { tag = "close", payload = Encode.object [ ( "socket", socket ) ] } :: acc
-
-                        _ ->
-                            acc
-            in
-            -- get list of all existing sockets that are no longer required
-            List.foldl (\k acc -> Dict.remove k acc) model.sockets urls
-                -- close each one
-                |> Dict.foldl go []
-    in
-    ( State { model | sockets = sockets }
-    , closeCmds ++ addCmds |> List.map model.toJs |> Cmd.batch
-    )
+    setSockets_ urls model |> convertFromPrivate
 
 
+{-| -}
 send : String -> String -> State -> ( State, Cmd Msg )
 send url message (State model) =
-    let
-        queueLength =
-            model.queues |> Dict.get url |> Maybe.map List.length |> Maybe.withDefault 0
-
-        newModel =
-            State <| addToQueue url message model
-    in
-    case Dict.get url model.sockets of
-        Just (Connected socket) ->
-            if Debug.log "send" <| queueLength == 0 then
-                -- as there is nothing in the queue we will try to send immediately
-                ( newModel
-                , model.toJs <| mkSend socket url message
-                )
-
-            else
-                ( newModel, Cmd.none )
-
-        Just (Opening _) ->
-            ( newModel, Cmd.none )
-
-        Nothing ->
-            -- there is no socket foreseen for url.
-            -- We will queue the message pending reconnection
-            ( newModel, Cmd.none )
+    send_ url message model |> convertFromPrivate
 
 
+{-| -}
 update : Msg -> State -> ( State, Cmd Msg )
 update msg (State model) =
-    update1 msg model |> Tuple.mapFirst State
+    update_ msg model |> convertFromPrivate
 
 
+{-| -}
 getStatus : String -> State -> ConnectionStatus
 getStatus url (State model) =
     case Dict.get url model.sockets of
@@ -176,11 +94,81 @@ listen dict wsMsg =
                         wsMsg <| DecodeError err
 
             Nothing ->
-                wsMsg <| convertIncomingMsg pmsg.tag pmsg.payload
+                wsMsg <| convertIncomingMsg pmsg
 
 
 
--- UPDATE (private)
+-- PRIVATE
+
+
+type alias Model =
+    { sockets : SocketsDict
+    , queues : QueuesDict
+    , toJs : PortMsg -> Cmd Msg
+    }
+
+
+initModel : (PortMsg -> Cmd Msg) -> Model
+initModel toJs =
+    { sockets = Dict.empty
+    , queues = Dict.empty
+    , toJs = toJs
+    }
+
+
+type alias SocketsDict =
+    Dict String Connection
+
+
+type Connection
+    = Opening Float --  backoff
+      --    = Opening  Float Process.Id -- backoff, id (so that we can kill if user no longer wants this socket)
+    | Connected WebSocket -- routingMsg, socket
+
+
+type alias QueuesDict =
+    Dict String (List String)
+
+
+type alias WebSocket =
+    Decode.Value
+
+
+{-| Defines the status of the connection as reported to users of the package
+-}
+type ConnectionStatus
+    = StatusOpening Float
+    | StatusConnected
+    | NoSocket
+
+
+convertFromPrivate ( model, cmd ) =
+    ( State model, convertCmdMsg model cmd )
+
+
+type CmdMsg
+    = Delay Float Msg
+    | SendToJs PortMsg
+    | BatchMsg (List CmdMsg)
+    | CmdNone
+
+
+convertCmdMsg : Model -> CmdMsg -> Cmd Msg
+convertCmdMsg model cmd =
+    case cmd of
+        Delay backoff msg ->
+            Process.sleep (2000 * backoff)
+                |> Task.andThen (\_ -> Task.succeed msg)
+                |> Task.perform (\_ -> NoOp)
+
+        SendToJs pmsg ->
+            model.toJs pmsg
+
+        BatchMsg lst ->
+            lst |> List.map (convertCmdMsg model) |> Cmd.batch
+
+        CmdNone ->
+            Cmd.none
 
 
 type Msg
@@ -188,58 +176,28 @@ type Msg
     | BadOpen ( String, String ) -- does not exist
     | SocketError ( String, Int ) -- url, readyState
     | SocketClose CloseConfirmation
-    | TryOpen String -- url
+    | TryOpen String -- url (callback from sleeping for backoff period)
     | GoodSend String -- url
     | BadSend ( String, String )
     | DecodeError Decode.Error
+    | NoOp
 
 
-update1 : Msg -> Model -> ( Model, Cmd Msg )
-update1 msg model =
+update_ : Msg -> Model -> ( Model, CmdMsg )
+update_ msg model =
     let
         addBackoff url backoff =
-            ( { model | sockets = Dict.insert url (Opening (1 + backoff)) model.sockets }
-            , Process.sleep (2000 * backoff) |> Task.perform (\_ -> TryOpen url)
+            ( { model | sockets = Dict.insert url (Opening <| 1 + backoff) model.sockets }
+            , Delay backoff (TryOpen url)
             )
     in
-    case msg of
-        SocketClose { url } ->
-            case Dict.get url model.sockets of
-                Just (Opening backoff) ->
-                    addBackoff url backoff
-
-                Just (Connected _) ->
-                    ( { model | sockets = Dict.insert url (Opening 0) model.sockets }
-                    , model.toJs <| mkOpenMsg url
-                    )
-
-                Nothing ->
-                    -- ignoring as user no longer cares about this socket
-                    ( model, Cmd.none )
-
-        BadSend ( url, reason ) ->
-            case Dict.get url model.sockets of
-                Just (Opening backoff) ->
-                    addBackoff url backoff
-
-                Just (Connected _) ->
-                    if reason == "NotOpen" then
-                        let
-                            m =
-                                { model | sockets = Dict.insert url (Opening 0) model.sockets }
-                        in
-                        ( m, model.toJs <| mkOpenMsg url )
-
-                    else
-                        let
-                            _ =
-                                Debug.log "BadSend" reason
-                        in
-                        ( model, Cmd.none )
-
-                _ ->
-                    -- ignore as user no longer cares about this socket
-                    ( model, Cmd.none )
+    case Debug.log "" msg of
+        GoodOpen ( url, socket ) ->
+            let
+                newModel =
+                    { model | sockets = Dict.insert url (Connected socket) model.sockets }
+            in
+            ( newModel, mkSendCmd newModel url |> Maybe.map SendToJs |> Maybe.withDefault CmdNone )
 
         BadOpen ( url, error ) ->
             case Dict.get url model.sockets of
@@ -252,38 +210,140 @@ update1 msg model =
 
                 _ ->
                     -- ignore as user no longer cares about this socket
-                    ( model, Cmd.none )
-
-        TryOpen url ->
-            ( model, model.toJs <| mkOpenMsg url )
-
-        GoodOpen ( url, socket ) ->
-            let
-                newModel =
-                    { model | sockets = Dict.insert url (Connected socket) model.sockets }
-            in
-            ( newModel, mkSendCmd newModel url )
-
-        GoodSend url ->
-            let
-                newModel =
-                    { model | queues = Dict.update url (Maybe.andThen List.tail) model.queues }
-            in
-            ( newModel, mkSendCmd newModel url )
+                    ( model, CmdNone )
 
         SocketError ( url, error ) ->
             let
                 _ =
                     Debug.log ("Error " ++ url) error
             in
-            ( model, Cmd.none )
+            ( model, CmdNone )
+
+        SocketClose { url } ->
+            case Dict.get url model.sockets of
+                Just (Opening backoff) ->
+                    addBackoff url backoff
+
+                Just (Connected _) ->
+                    ( { model | sockets = Dict.insert url (Opening 0) model.sockets }
+                    , SendToJs <| mkOpenMsg url
+                    )
+
+                Nothing ->
+                    -- ignoring as user no longer cares about this socket
+                    ( model, CmdNone )
+
+        TryOpen url ->
+            ( model, SendToJs <| mkOpenMsg url )
+
+        GoodSend url ->
+            let
+                newModel =
+                    { model | queues = Dict.update url (Maybe.andThen List.tail) model.queues }
+            in
+            ( newModel, mkSendCmd newModel url |> Maybe.map SendToJs |> Maybe.withDefault CmdNone )
+
+        BadSend ( url, reason ) ->
+            case Dict.get url model.sockets of
+                Just (Opening backoff) ->
+                    addBackoff url backoff
+
+                Just (Connected _) ->
+                    if reason == "NotOpen" then
+                        let
+                            m =
+                                { model | sockets = Dict.insert url (Opening 0) model.sockets }
+                        in
+                        ( m, SendToJs <| mkOpenMsg url )
+
+                    else
+                        let
+                            _ =
+                                Debug.log "BadSend" reason
+                        in
+                        ( model, CmdNone )
+
+                _ ->
+                    -- ignore as user no longer cares about this socket
+                    ( model, CmdNone )
 
         DecodeError err ->
             let
                 _ =
                     Debug.log "decode error" <| Decode.errorToString err
             in
-            ( model, Cmd.none )
+            ( model, CmdNone )
+
+        NoOp ->
+            ( model, CmdNone )
+
+
+setSockets_ : List String -> Model -> ( Model, CmdMsg )
+setSockets_ urls model =
+    let
+        handleUrl url ( accSockets, accCmds ) =
+            case Dict.get url model.sockets of
+                Just socket ->
+                    -- copy across existing socket
+                    ( Dict.insert url socket accSockets, accCmds )
+
+                Nothing ->
+                    -- this is a new socket, so we will need to open it
+                    ( Dict.insert url (Opening 0) accSockets
+                    , SendToJs (mkOpenMsg url) :: accCmds
+                    )
+
+        ( sockets, addCmds ) =
+            List.foldl handleUrl ( Dict.empty, [] ) urls
+
+        closeCmds =
+            let
+                go _ v acc =
+                    case v of
+                        Connected socket ->
+                            SendToJs (mkCloseMsg socket) :: acc
+
+                        _ ->
+                            -- ideally we want to stop the sleep process
+                            acc
+            in
+            -- get list of all existing sockets that are no longer required
+            List.foldl (\k acc -> Dict.remove k acc) model.sockets urls
+                -- close each one
+                |> Dict.foldl go []
+    in
+    ( { model | sockets = sockets }
+    , BatchMsg (closeCmds ++ addCmds)
+    )
+
+
+send_ : String -> String -> Model -> ( Model, CmdMsg )
+send_ url message model =
+    let
+        queueLength =
+            model.queues |> Dict.get url |> Maybe.map List.length |> Maybe.withDefault 0
+
+        newModel =
+            addToQueue url message model
+    in
+    case Dict.get url model.sockets of
+        Just (Connected socket) ->
+            if queueLength == 0 then
+                -- as there is nothing in the queue we will try to send immediately
+                ( newModel
+                , SendToJs <| mkSend socket url message
+                )
+
+            else
+                ( newModel, CmdNone )
+
+        Just (Opening _) ->
+            ( newModel, CmdNone )
+
+        Nothing ->
+            -- there is no socket foreseen for url.
+            -- We will queue the message pending reconnection
+            ( newModel, CmdNone )
 
 
 
@@ -297,17 +357,16 @@ addToQueue url msg model =
     { model | queues = Dict.update url (\mbQueue -> Just <| (mbQueue |> Maybe.withDefault []) ++ [ msg ]) model.queues }
 
 
-mkSendCmd : Model -> String -> Cmd Msg
+mkSendCmd : Model -> String -> Maybe PortMsg
 mkSendCmd model url =
     case Dict.get url model.sockets of
         Just (Connected socket) ->
             model.queues
                 |> getNextMsg url
-                |> Maybe.map (mkSend socket url >> model.toJs)
-                |> Maybe.withDefault Cmd.none
+                |> Maybe.map (mkSend socket url)
 
         _ ->
-            Cmd.none
+            Nothing
 
 
 getNextMsg : String -> QueuesDict -> Maybe String
@@ -318,6 +377,11 @@ getNextMsg url queues =
 mkOpenMsg : String -> PortMsg
 mkOpenMsg url =
     { tag = "open", payload = Encode.string url }
+
+
+mkCloseMsg : Value -> PortMsg
+mkCloseMsg socket =
+    { tag = "close", payload = Encode.object [ ( "socket", socket ) ] }
 
 
 mkSend : WebSocket -> String -> String -> PortMsg
@@ -336,7 +400,8 @@ mkSend socket url message =
 -- helpers (incoming)
 
 
-convertIncomingMsg tag payload =
+convertIncomingMsg : PortMsg -> Msg
+convertIncomingMsg { tag, payload } =
     let
         handler dec msg =
             Decode.decodeValue dec payload
