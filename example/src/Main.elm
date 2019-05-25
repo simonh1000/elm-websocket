@@ -8,6 +8,12 @@ import Html.Events exposing (onClick)
 import WebSocket exposing (PortMsg)
 
 
+
+-- ---------------------------
+-- PORTS
+-- ---------------------------
+
+
 port fromJs : (WebSocket.PortMsg -> msg) -> Sub msg
 
 
@@ -29,15 +35,23 @@ type alias Model =
 
 init : () -> ( Model, Cmd Msg )
 init _ =
-    ( { ws = WebSocket.init toJs, message = "", count = 1 }, Cmd.none )
+    ( { ws = WebSocket.init, message = "", count = 1 }, Cmd.none )
+
+
+subscriptions _ =
+    fromJs <| WebSocket.listen listeners WSMsg
+
+
+listeners =
+    Dict.singleton url OnEcho
 
 
 url =
     "wss://echo.websocket.org"
 
 
-listeners =
-    Dict.singleton url OnEcho
+wsConfig =
+    { toJs = toJs }
 
 
 
@@ -61,17 +75,17 @@ update message model =
             ( { model | message = str }, Cmd.none )
 
         Disconnect ->
-            handleSocket (WebSocket.setSockets []) model
+            handleSocket (WebSocket.setSockets wsConfig []) model
 
         Connect ->
-            handleSocket (WebSocket.setSockets <| Dict.keys listeners) model
+            handleSocket (WebSocket.setSockets wsConfig <| Dict.keys listeners) model
 
         Send ->
-            handleSocket (WebSocket.send url <| "message: " ++ String.fromInt model.count)
+            handleSocket (WebSocket.send wsConfig url <| "message: " ++ String.fromInt model.count)
                 { model | count = model.count + 1 }
 
         WSMsg msg ->
-            handleSocket (WebSocket.update msg) model
+            handleSocket (WebSocket.update wsConfig msg) model
 
 
 handleSocket : (WebSocket.State -> ( WebSocket.State, Cmd WebSocket.Msg )) -> Model -> ( Model, Cmd Msg )
@@ -89,8 +103,14 @@ handleSocket fn m =
 -- ---------------------------
 
 
-view : Model -> Html Msg
 view model =
+    { title = "Elm 0.19 starter"
+    , body = [ view_ model ]
+    }
+
+
+view_ : Model -> Html Msg
+view_ model =
     div [ class "container" ]
         [ div []
             [ button [ onClick Disconnect ] [ text "Disconnect" ]
@@ -113,10 +133,6 @@ main =
     Browser.document
         { init = init
         , update = update
-        , view =
-            \m ->
-                { title = "Elm 0.19 starter"
-                , body = [ view m ]
-                }
-        , subscriptions = \_ -> fromJs <| WebSocket.listen listeners WSMsg
+        , view = view
+        , subscriptions = subscriptions
         }

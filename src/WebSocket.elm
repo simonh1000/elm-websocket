@@ -1,4 +1,4 @@
-module WebSocket exposing (CloseConfirmation, CmdMsg(..), Connection(..), ConnectionStatus(..), Model, Msg(..), PortMsg, QueuesDict, SocketsDict, State(..), WebSocket, addToQueue, convertCmdMsg, convertFromPrivate, convertIncomingMsg, decodeBadAction, decodeClose, decodeError, decodeGoodOpen, decodeUrl, getNextMsg, getStatus, init, initModel, listen, mkCloseMsg, mkOpenMsg, mkSend, mkSendCmd, recover, send, send_, setSockets, setSockets_, update, update_)
+module WebSocket exposing (CloseConfirmation, CmdMsg(..), Config, Connection(..), ConnectionStatus(..), Model, Msg(..), PortMsg, QueuesDict, SocketsDict, State(..), WebSocket, addToQueue, convertCmdMsg, convertFromPrivate, convertIncomingMsg, decodeBadAction, decodeClose, decodeError, decodeGoodOpen, decodeUrl, getNextMsg, getStatus, init, initModel, listen, mkCloseMsg, mkOpenMsg, mkSend, mkSendCmd, recover, send, send_, setSockets, setSockets_, update, update_)
 
 --module WebSocket exposing (ConnectionStatus(..), Msg, PortMsg, State, getStatus, init, listen, send, setSockets, update)
 
@@ -15,12 +15,20 @@ import Task
 -- -------------------
 
 
-{-| -}
+{-| Opaque type that you need to include in your model
+-}
 type State
     = State Model
 
 
-{-| -}
+{-| Create a new WebSocket State
+-}
+init =
+    State initModel
+
+
+{-| The type of the data structure you need to provide in/out ports for
+-}
 type alias PortMsg =
     { tag : String
     , -- must be Value as we passing sockets, as well as string data
@@ -28,9 +36,16 @@ type alias PortMsg =
     }
 
 
-{-| -}
-init =
-    State << initModel
+type alias Config =
+    { toJs : PortMsg -> Cmd Msg }
+
+
+{-| Defines the status of the connection as reported to users of the package
+-}
+type ConnectionStatus
+    = StatusOpening Float
+    | StatusConnected
+    | NoSocket
 
 
 {-| Client changes the socket they want to use
@@ -39,21 +54,21 @@ init =
     - open those that we do no have
 
 -}
-setSockets : List String -> State -> ( State, Cmd Msg )
-setSockets urls (State model) =
-    setSockets_ urls model |> convertFromPrivate
+setSockets : Config -> List String -> State -> ( State, Cmd Msg )
+setSockets config urls (State model) =
+    setSockets_ urls model |> convertFromPrivate config.toJs
 
 
 {-| -}
-send : String -> String -> State -> ( State, Cmd Msg )
-send url message (State model) =
-    send_ url message model |> convertFromPrivate
+send : Config -> String -> String -> State -> ( State, Cmd Msg )
+send config url message (State model) =
+    send_ url message model |> convertFromPrivate config.toJs
 
 
 {-| -}
-update : Msg -> State -> ( State, Cmd Msg )
-update msg (State model) =
-    update_ msg model |> convertFromPrivate
+update : Config -> Msg -> State -> ( State, Cmd Msg )
+update config msg (State model) =
+    update_ msg model |> convertFromPrivate config.toJs
 
 
 {-| -}
@@ -104,15 +119,13 @@ listen dict wsMsg =
 type alias Model =
     { sockets : SocketsDict
     , queues : QueuesDict
-    , toJs : PortMsg -> Cmd Msg
     }
 
 
-initModel : (PortMsg -> Cmd Msg) -> Model
-initModel toJs =
+initModel : Model
+initModel =
     { sockets = Dict.empty
     , queues = Dict.empty
-    , toJs = toJs
     }
 
 
@@ -134,16 +147,8 @@ type alias WebSocket =
     Decode.Value
 
 
-{-| Defines the status of the connection as reported to users of the package
--}
-type ConnectionStatus
-    = StatusOpening Float
-    | StatusConnected
-    | NoSocket
-
-
-convertFromPrivate ( model, cmd ) =
-    ( State model, convertCmdMsg model cmd )
+convertFromPrivate toJs ( model, cmd ) =
+    ( State model, convertCmdMsg toJs model cmd )
 
 
 type CmdMsg
@@ -153,8 +158,8 @@ type CmdMsg
     | CmdNone
 
 
-convertCmdMsg : Model -> CmdMsg -> Cmd Msg
-convertCmdMsg model cmd =
+convertCmdMsg : (PortMsg -> Cmd Msg) -> Model -> CmdMsg -> Cmd Msg
+convertCmdMsg toJs model cmd =
     case cmd of
         Delay backoff msg ->
             Process.sleep (2000 * backoff)
@@ -162,10 +167,10 @@ convertCmdMsg model cmd =
                 |> Task.perform (\_ -> NoOp)
 
         SendToJs pmsg ->
-            model.toJs pmsg
+            toJs pmsg
 
         BatchMsg lst ->
-            lst |> List.map (convertCmdMsg model) |> Cmd.batch
+            lst |> List.map (convertCmdMsg toJs model) |> Cmd.batch
 
         CmdNone ->
             Cmd.none
@@ -191,7 +196,7 @@ update_ msg model =
             , Delay backoff (TryOpen url)
             )
     in
-    case Debug.log "" msg of
+    case msg of
         GoodOpen ( url, socket ) ->
             let
                 newModel =
@@ -431,6 +436,13 @@ convertIncomingMsg { tag, payload } =
             Debug.todo tag
 
 
+decodeGoodOpen : Decoder ( String, WebSocket )
+decodeGoodOpen =
+    Decode.map2 Tuple.pair
+        decodeUrl
+        (Decode.field "socket" Decode.value)
+
+
 type alias CloseConfirmation =
     { url : String
     , code : Int
@@ -439,19 +451,13 @@ type alias CloseConfirmation =
     }
 
 
+decodeClose : Decoder CloseConfirmation
 decodeClose =
     Decode.map4 CloseConfirmation
         decodeUrl
         (Decode.field "code" Decode.int)
         (Decode.field "reason" Decode.string)
         (Decode.field "wasClean" Decode.bool)
-
-
-decodeGoodOpen : Decoder ( String, WebSocket )
-decodeGoodOpen =
-    Decode.map2 Tuple.pair
-        decodeUrl
-        (Decode.field "socket" Decode.value)
 
 
 decodeBadAction : Decoder ( String, String )

@@ -12,7 +12,7 @@ setSocketsTests =
     describe "setSockets Tests"
         [ test "attempt to open new socket" <|
             \_ ->
-                setSockets_ [ ws1 ] (initModel (\_ -> Cmd.none))
+                setSockets_ [ ws1 ] initModel
                     |> Tuple.first
                     |> .sockets
                     |> Dict.get ws1
@@ -25,7 +25,7 @@ sendTests =
     describe "send Tests"
         [ test "send when no socket ready adds to queue" <|
             \_ ->
-                send_ ws1 "test" (initModel (\_ -> Cmd.none))
+                send_ ws1 "test" initModel
                     |> Tuple.first
                     |> .queues
                     |> Dict.get ws1
