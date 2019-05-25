@@ -43,7 +43,7 @@ subscriptions _ =
 
 
 listeners =
-    Dict.singleton url OnEcho
+    Dict.fromList [ ( url, OnEcho ) ]
 
 
 url =

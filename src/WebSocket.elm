@@ -101,12 +101,10 @@ listen dict wsMsg =
     \pmsg ->
         case Dict.get pmsg.tag dict of
             Just fn ->
-                case Decode.decodeValue Decode.string pmsg.payload of
-                    Ok str ->
-                        fn str
-
-                    Err err ->
-                        wsMsg <| DecodeError err
+                -- we have a message from a socket
+                Decode.decodeValue Decode.string pmsg.payload
+                    |> Result.map fn
+                    |> recover (wsMsg << DecodeError)
 
             Nothing ->
                 wsMsg <| convertIncomingMsg pmsg
@@ -429,11 +427,8 @@ convertIncomingMsg { tag, payload } =
         "close" ->
             handler decodeClose SocketClose
 
-        "error" ->
-            handler decodeError SocketError
-
         _ ->
-            Debug.todo tag
+            handler decodeError SocketError
 
 
 decodeGoodOpen : Decoder ( String, WebSocket )

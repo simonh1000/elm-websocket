@@ -1,25 +1,26 @@
-# Websockets
+# Websocket
 
 Aim: to reproduce as closely as possible the API of the 0.18 library.
 
-Because of the need to use Ports, the amount of boilerplate is much higher.
+Because of the need to use Ports, the amount of boilerplate is much higher. Beyond the boiler plate the only real difference is that you have declare your socket listeners as a Dict rather than calling `listen` multiple times.
 
 ## Installation
 
-1) Define ports
+1) Define ports and use these to create the required Config 
 
     ```
     port fromJs : (WebSocket.PortMsg -> msg) -> Sub msg
     port toJs : WebSocket.PortMsg -> Cmd msg
+    wsConfig = { toJs = toJs }
     ```
     
     The names do not matter, as you will have to wire them up anyway
 
-2) Add `WebSocket.State msg` to Model
+2) Add `WebSocket.State` to Model
 
     ```
     type alias Model =
-        { ws : WebSocket.State Msg
+        { ws : WebSocket.State
         , ...
         }
     ```
@@ -37,7 +38,7 @@ Because of the need to use Ports, the amount of boilerplate is much higher.
 
     ```
     WSMsg msg ->
-        WebSocket.update msg model.ws
+        WebSocket.update wsConfig msg model.ws
            |> \(ws, cmd) -> ({ model | ws = ws }, Cmd.map WSMsg cmd )     
     ```
         
@@ -45,7 +46,7 @@ Because of the need to use Ports, the amount of boilerplate is much higher.
 
     ```
     listeners =
-        Dict.singleton "ws://echo.websocket.org" OnEcho
+        Dict.fromList [ ( "ws://echo.websocket.org", OnEcho ) ]
         
     Browser.document
         { subscriptions = \_ -> fromJs <| WebSocket.listen listeners WSMsg
@@ -56,17 +57,17 @@ Because of the need to use Ports, the amount of boilerplate is much higher.
 6) Open some sockets!
 
     ```
-    WebSocket.setSockets (Dict.keys listeners) model.ws
+    WebSocket.setSockets wsConfig (Dict.keys listeners) model.ws
         |> \(ws, cmd) -> ( { model | ws = ws }, Cmd.map WSMsg cmd )
     ``` 
 
-7) [Javascript] copy elm_websocket.js in to project, and connect to app. For example,
+7) [Javascript] copy elm_websocket.js in to your project, and connect to app. For example,
 
     ```js
     import {_WebSocket_handler} from "./elm_websocket";
     
     const { Elm } = require("./Main");
-    var app = Elm.Main.init({ flags: null });
+    var app = Elm.Main.init();
     
     app.ports.toJs.subscribe(data => _WebSocket_handler(data, app.ports.fromJs.send);
     ```
@@ -79,12 +80,3 @@ Setting and unsetting sockets
 - 0.18 - the subscriptions chosen
 - 0.19 - a specific function called in the update process
 
-
-Lifecycle
-- opening 
-    - triggered by user selecting the port; or
-    - attempt to reconnect after unexpected closing
-    - exponential backoff 
-- open (route messages to client)
-- closed by server / network down
-- closed by client (does not exist, client must deselect client)
