@@ -1,7 +1,5 @@
 module WebSocket exposing (CloseConfirmation, CmdMsg(..), Config, Connection(..), ConnectionStatus(..), Model, Msg(..), PortMsg, QueuesDict, SocketsDict, State(..), WebSocket, addToQueue, convertCmdMsg, convertFromPrivate, convertIncomingMsg, decodeBadAction, decodeClose, decodeError, decodeGoodOpen, decodeUrl, getNextMsg, getStatus, init, initModel, listen, mkCloseMsg, mkOpenMsg, mkSend, mkSendCmd, recover, send, send_, setSockets, setSockets_, update, update_)
 
---module WebSocket exposing (ConnectionStatus(..), Msg, PortMsg, State, getStatus, init, listen, send, setSockets, update)
-
 import Dict exposing (Dict)
 import Json.Decode as Decode exposing (Decoder, Value)
 import Json.Encode as Encode
@@ -37,7 +35,7 @@ type alias PortMsg =
 
 
 type alias Config =
-    { toJs : PortMsg -> Cmd Msg }
+    { toSocket : PortMsg -> Cmd Msg }
 
 
 {-| Defines the status of the connection as reported to users of the package
@@ -56,19 +54,19 @@ type ConnectionStatus
 -}
 setSockets : Config -> List String -> State -> ( State, Cmd Msg )
 setSockets config urls (State model) =
-    setSockets_ urls model |> convertFromPrivate config.toJs
+    setSockets_ urls model |> convertFromPrivate config.toSocket
 
 
 {-| -}
 send : Config -> String -> String -> State -> ( State, Cmd Msg )
 send config url message (State model) =
-    send_ url message model |> convertFromPrivate config.toJs
+    send_ url message model |> convertFromPrivate config.toSocket
 
 
 {-| -}
 update : Config -> Msg -> State -> ( State, Cmd Msg )
 update config msg (State model) =
-    update_ msg model |> convertFromPrivate config.toJs
+    update_ msg model |> convertFromPrivate config.toSocket
 
 
 {-| -}
@@ -145,8 +143,8 @@ type alias WebSocket =
     Decode.Value
 
 
-convertFromPrivate toJs ( model, cmd ) =
-    ( State model, convertCmdMsg toJs model cmd )
+convertFromPrivate toSocket ( model, cmd ) =
+    ( State model, convertCmdMsg toSocket model cmd )
 
 
 type CmdMsg
@@ -157,18 +155,21 @@ type CmdMsg
 
 
 convertCmdMsg : (PortMsg -> Cmd Msg) -> Model -> CmdMsg -> Cmd Msg
-convertCmdMsg toJs model cmd =
-    case cmd of
+convertCmdMsg toSocket model cmd =
+    case Debug.log "convertCmdMsg" cmd of
         Delay backoff msg ->
             Process.sleep (2000 * backoff)
                 |> Task.andThen (\_ -> Task.succeed msg)
                 |> Task.perform (\_ -> NoOp)
 
         SendToJs pmsg ->
-            toJs pmsg
+            toSocket pmsg
+
+        BatchMsg [ item ] ->
+            convertCmdMsg toSocket model item
 
         BatchMsg lst ->
-            lst |> List.map (convertCmdMsg toJs model) |> Cmd.batch
+            lst |> List.map (convertCmdMsg toSocket model) |> Cmd.batch
 
         CmdNone ->
             Cmd.none
@@ -293,7 +294,7 @@ setSockets_ urls model =
                 Nothing ->
                     -- this is a new socket, so we will need to open it
                     ( Dict.insert url (Opening 0) accSockets
-                    , SendToJs (mkOpenMsg url) :: accCmds
+                    , SendToJs (mkOpenMsg <| Debug.log "opening" url) :: accCmds
                     )
 
         ( sockets, addCmds ) =
@@ -301,9 +302,13 @@ setSockets_ urls model =
 
         closeCmds =
             let
-                go _ v acc =
+                go k v acc =
                     case v of
                         Connected socket ->
+                            let
+                                _ =
+                                    Debug.log "closing" k
+                            in
                             SendToJs (mkCloseMsg socket) :: acc
 
                         _ ->
@@ -329,7 +334,7 @@ send_ url message model =
         newModel =
             addToQueue url message model
     in
-    case Dict.get url model.sockets of
+    case Debug.log "send_" <| Dict.get url model.sockets of
         Just (Connected socket) ->
             if queueLength == 0 then
                 -- as there is nothing in the queue we will try to send immediately
@@ -404,7 +409,7 @@ mkSend socket url message =
 
 
 convertIncomingMsg : PortMsg -> Msg
-convertIncomingMsg { tag, payload } =
+convertIncomingMsg ({ tag, payload } as pmsg) =
     let
         handler dec msg =
             Decode.decodeValue dec payload
@@ -427,8 +432,15 @@ convertIncomingMsg { tag, payload } =
         "close" ->
             handler decodeClose SocketClose
 
-        _ ->
+        "error" ->
             handler decodeError SocketError
+
+        _ ->
+            let
+                _ =
+                    Debug.log "convertIncomingMsg" tag
+            in
+            Debug.todo (Encode.encode 0 payload)
 
 
 decodeGoodOpen : Decoder ( String, WebSocket )

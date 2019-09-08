@@ -8,70 +8,76 @@ Because of the need to use Ports, the amount of boilerplate is much higher. Beyo
 
 1) Define ports and use these to create the required Config 
 
-    ```
-    port fromJs : (WebSocket.PortMsg -> msg) -> Sub msg
-    port toJs : WebSocket.PortMsg -> Cmd msg
-    wsConfig = { toJs = toJs }
-    ```
+```
+port fromSocket : (WebSocket.PortMsg -> msg) -> Sub msg
+port toSocket : WebSocket.PortMsg -> Cmd msg
+wsConfig : WebSocket.Config
+wsConfig =
+    { toJs = toJs }
+```
     
-    The names do not matter, as you will have to wire them up anyway
+The names do not matter, as you will have to wire them up anyway
 
 2) Add `WebSocket.State` to Model
 
-    ```
-    type alias Model =
-        { ws : WebSocket.State
-        , ...
-        }
-    ```
+```
+type alias Model =
+    { socket : WebSocket.State
+    , ...
+    }
+```
 
 3) Add a `Msg` to wrap `WebSocket.Msg`
 
     ```
     type Msg
         = WSMsg WebSocket.Msg
+        | OnEcho String
         | ...
 
     ```
     
 4) Wire up the update function
 
-    ```
-    WSMsg msg ->
-        WebSocket.update wsConfig msg model.ws
-           |> \(ws, cmd) -> ({ model | ws = ws }, Cmd.map WSMsg cmd )     
-    ```
+```
+WSMsg msg ->
+    WebSocket.update wsConfig msg model.socket
+       |> \(socket, cmd) -> ({ model | socket = socket }, Cmd.map WSMsg cmd )     
+```
         
 5) Connect subscriptions 
 
-    ```
-    listeners =
-        Dict.fromList [ ( "ws://echo.websocket.org", OnEcho ) ]
-        
-    Browser.document
-        { subscriptions = \_ -> fromJs <| WebSocket.listen listeners WSMsg
-        , ...
-        }
-    ```
+Here you pass the a list of sockets and the Msg you want websocket "messages" to be passed to your code. Other packets received on the socket will be handled by the WebSocket package itself.
+
+```
+listeners =
+    Dict.fromList [ ( "ws://echo.websocket.org", OnEcho ) ]
+    
+Browser.document
+    { subscriptions = \_ -> fromSocket <| WebSocket.listen listeners WSMsg
+    , ...
+    }
+```
 
 6) Open some sockets!
 
-    ```
-    WebSocket.setSockets wsConfig (Dict.keys listeners) model.ws
-        |> \(ws, cmd) -> ( { model | ws = ws }, Cmd.map WSMsg cmd )
-    ``` 
+```
+WebSocket.setSockets wsConfig (Dict.keys listeners) model.ws
+    |> \(socket, cmd) -> ( { model | socket = socket }, Cmd.map WSMsg cmd )
+``` 
 
 7) [Javascript] copy elm_websocket.js in to your project, and connect to app. For example,
 
-    ```js
-    import {_WebSocket_handler} from "./elm_websocket";
-    
-    const { Elm } = require("./Main");
-    var app = Elm.Main.init();
-    
-    app.ports.toJs.subscribe(data => _WebSocket_handler(data, app.ports.fromJs.send);
-    ```
+```js
+import {_WebSocket_handler} from "./elm_websocket";
 
+const { Elm } = require("./Main");
+var app = Elm.Main.init();
+
+app.ports.toSocket.subscribe(data => _WebSocket_handler(data, app.ports.fromSocket.send));
+```
+
+See `/example` for full code. 
 
 ## Notes
 

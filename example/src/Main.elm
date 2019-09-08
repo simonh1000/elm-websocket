@@ -1,11 +1,16 @@
 port module Main exposing (main)
 
 import Browser
-import Dict
+import Dict exposing (Dict)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (onClick)
 import WebSocket exposing (PortMsg)
+
+
+url : String
+url =
+    "wss://echo.websocket.org"
 
 
 
@@ -14,10 +19,10 @@ import WebSocket exposing (PortMsg)
 -- ---------------------------
 
 
-port fromJs : (WebSocket.PortMsg -> msg) -> Sub msg
+port fromSocket : (WebSocket.PortMsg -> msg) -> Sub msg
 
 
-port toJs : WebSocket.PortMsg -> Cmd msg
+port toSocket : WebSocket.PortMsg -> Cmd msg
 
 
 
@@ -38,20 +43,9 @@ init _ =
     ( { ws = WebSocket.init, message = "", count = 1 }, Cmd.none )
 
 
-subscriptions _ =
-    fromJs <| WebSocket.listen listeners WSMsg
-
-
-listeners =
-    Dict.fromList [ ( url, OnEcho ) ]
-
-
-url =
-    "wss://echo.websocket.org"
-
-
+wsConfig : WebSocket.Config
 wsConfig =
-    { toJs = toJs }
+    { toSocket = toSocket }
 
 
 
@@ -120,6 +114,22 @@ view_ model =
         , div [] [ text <| Debug.toString <| WebSocket.getStatus url model.ws ]
         , div [] [ text model.message ]
         ]
+
+
+
+-- ---------------------------
+-- Subscriptions
+-- ---------------------------
+
+
+subscriptions : Model -> Sub Msg
+subscriptions _ =
+    fromSocket <| WebSocket.listen listeners WSMsg
+
+
+listeners : Dict String (String -> Msg)
+listeners =
+    Dict.fromList [ ( url, OnEcho ) ]
 
 
 
