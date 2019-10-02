@@ -1,7 +1,5 @@
-//
-
-window.addEventListener("offline", () => console.log("offline"));
-window.addEventListener("online", () => console.log("online"));
+//window.addEventListener("offline", () => console.log("offline"));
+//window.addEventListener("online", () => console.log("online"));
 
 const __WS_BadSecurity = "BadSecurity";
 const __WS_BadArgs = "BadArgs"; // e.g. the url does not host a socket server
@@ -11,6 +9,7 @@ const __WS_NotOpen = "NotOpen";
 const __WS_BadString = "BadString";
 
 export function _WebSocket_handler(data, cb) {
+    // console.log("[_WebSocket_handler]", data);
     switch (data.tag) {
         case "open":
             _WebSocket_open(data.payload, cb);
@@ -34,6 +33,7 @@ function _WebSocket_open(url, callback) {
     try {
         socket = new WebSocket(url);
     } catch (err) {
+        console.error("[WS] ***** creation of websocket failed", url);
         return callback({
             tag: "BadOpen",
             payload: {
@@ -44,15 +44,17 @@ function _WebSocket_open(url, callback) {
     }
 
     socket.addEventListener("open", function(event) {
-        callback({ tag: "GoodOpen", payload: { url, socket } });
+        let res = { tag: "GoodOpen", payload: { url, socket } };
+        callback(res);
     });
 
     socket.addEventListener("message", function(event) {
+        // console.log("[WS] message", event);
         callback({ tag: url, payload: event.data });
     });
 
     socket.addEventListener("error", function(event) {
-        console.log("Error", event);
+        // console.log("Error", event);
         callback({
             tag: "error",
             payload: {
@@ -63,6 +65,7 @@ function _WebSocket_open(url, callback) {
     });
 
     socket.addEventListener("close", function(event) {
+        // console.log(event);
         callback({
             tag: "close",
             payload: {
@@ -76,7 +79,8 @@ function _WebSocket_open(url, callback) {
 }
 
 function _WebSocket_send({ socket, url, message }, callback) {
-    var resp = {tag: "GoodSend", payload: {url: url}}
+//    console.log("[_WebSocket_send] About to send", url, message);
+    var resp = { tag: "GoodSend", payload: { url: url } };
 
     if (socket.readyState !== WebSocket.OPEN) {
         resp.tag = "BadSend";
@@ -94,12 +98,13 @@ function _WebSocket_send({ socket, url, message }, callback) {
         return callback(resp);
     }
 
-//    callback({ tag, payload: { url } });
+    //    callback({ tag, payload: { url } });
 }
 
-function _WebSocket_close ({ reason, socket }, callback) {
+function _WebSocket_close({uid, socket }, callback) {
     try {
-        socket.close(1000, "user requested close");
+        console.log("Attempting to close socket:", uid);
+        socket.close(1000, uid);
     } catch (err) {
         return callback({
             tag: err.name === "SyntaxError" ? __WS_BadReason : __WS_BadCode,
@@ -111,5 +116,5 @@ function _WebSocket_close ({ reason, socket }, callback) {
 }
 
 function _WebSocket_bytesQueued(socket, callback) {
-    callback({tag: "BytesQueued", payload: socket.bufferedAmount});
+    callback({ tag: "BytesQueued", payload: socket.bufferedAmount });
 }

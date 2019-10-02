@@ -1,4 +1,4 @@
-module WebSocket exposing (CloseConfirmation, CmdMsg(..), Config, Connection(..), ConnectionStatus(..), Model, Msg(..), PortMsg, QueuesDict, SocketsDict, State(..), WebSocket, addToQueue, convertCmdMsg, convertFromPrivate, convertIncomingMsg, decodeBadAction, decodeClose, decodeError, decodeGoodOpen, decodeUrl, getNextMsg, getStatus, init, initModel, listen, mkCloseMsg, mkOpenMsg, mkSend, mkSendCmd, recover, send, send_, setSockets, setSockets_, update, update_)
+module WebSocket exposing (ConnectionStatus(..), Msg, PortMsg, State, WSConfig, closeSocket, getStatus, init, listen, send, setSockets, update)
 
 import Dict exposing (Dict)
 import Json.Decode as Decode exposing (Decoder, Value)
@@ -34,16 +34,14 @@ type alias PortMsg =
     }
 
 
-type alias Config =
-    { toSocket : PortMsg -> Cmd Msg }
-
-
-{-| Defines the status of the connection as reported to users of the package
--}
-type ConnectionStatus
-    = StatusOpening Float
-    | StatusConnected
-    | NoSocket
+type alias WSConfig msg =
+    { -- a port
+      toSocket : PortMsg -> msg
+    , -- returns the url that closed
+      onClosedDown : String -> msg
+    , -- optional, user defined value (to help monitor closing)
+      uid : Maybe String
+    }
 
 
 {-| Client changes the socket they want to use
@@ -52,32 +50,58 @@ type ConnectionStatus
     - open those that we do no have
 
 -}
-setSockets : Config -> List String -> State -> ( State, Cmd Msg )
+setSockets : WSConfig msg -> List String -> State -> ( State, Cmd Msg, List msg )
 setSockets config urls (State model) =
-    setSockets_ urls model |> convertFromPrivate config.toSocket
+    setSockets_ urls model |> convertFromPrivate config
+
+
+closeSocket : WSConfig msg -> String -> State -> ( State, Cmd Msg, List msg )
+closeSocket config url (State model) =
+    closeSocket_ config.uid url model |> convertFromPrivate config
 
 
 {-| -}
-send : Config -> String -> String -> State -> ( State, Cmd Msg )
+send : WSConfig msg -> String -> String -> State -> ( State, Cmd Msg, List msg )
 send config url message (State model) =
-    send_ url message model |> convertFromPrivate config.toSocket
+    send_ url message model |> convertFromPrivate config
+
+
+type Msg
+    = GoodOpen ( String, WebSocket )
+    | BadOpen ( String, String ) -- does not exist
+    | SocketError ( String, Int ) -- url, readyState
+    | SocketClose CloseConfirmation
+    | TryOpen String -- url (callback from sleeping for backoff period)
+    | GoodSend String -- url
+    | BadSend ( String, String )
+    | DecodeError Decode.Error
+    | NoOp
 
 
 {-| -}
-update : Config -> Msg -> State -> ( State, Cmd Msg )
+update : WSConfig msg -> Msg -> State -> ( State, Cmd Msg, List msg )
 update config msg (State model) =
-    update_ msg model |> convertFromPrivate config.toSocket
+    update_ msg model |> convertFromPrivate config
 
 
-{-| -}
+{-| Defines the status of the connection as reported to users of the package
+-}
+type ConnectionStatus
+    = SocketOpening Float
+    | SocketConnected
+    | NoSocket
+
+
+{-| Returns the status of the socket
+-}
 getStatus : String -> State -> ConnectionStatus
 getStatus url (State model) =
     case Dict.get url model.sockets of
         Just (Connected _) ->
-            StatusConnected
+            SocketConnected
 
         Just (Opening backoff) ->
-            StatusOpening backoff
+            SocketOpening backoff
 
         Nothing ->
             NoSocket
@@ -102,7 +126,7 @@ listen dict wsMsg =
                 -- we have a message from a socket
                 Decode.decodeValue Decode.string pmsg.payload
                     |> Result.map fn
-                    |> recover (wsMsg << DecodeError)
+                    |> extract (wsMsg << DecodeError)
 
             Nothing ->
                 wsMsg <| convertIncomingMsg pmsg
@@ -143,48 +167,52 @@ type alias WebSocket =
     Decode.Value
 
 
-convertFromPrivate toSocket ( model, cmd ) =
-    ( State model, convertCmdMsg toSocket model cmd )
+convertFromPrivate : WSConfig msg -> ( Model, CmdMsg ) -> ( State, Cmd Msg, List msg )
+convertFromPrivate config ( model, cmd ) =
+    convertCmdMsg config model cmd
+        |> (\( cmds, msgs ) -> ( State model, cmds, msgs ))
 
 
 type CmdMsg
     = Delay Float Msg
     | SendToJs PortMsg
     | BatchMsg (List CmdMsg)
+    | ReportError String
+    | SocketClosedCleanly String -- url
     | CmdNone
 
 
-convertCmdMsg : (PortMsg -> Cmd Msg) -> Model -> CmdMsg -> Cmd Msg
-convertCmdMsg toSocket model cmd =
-    case Debug.log "convertCmdMsg" cmd of
+convertCmdMsg : WSConfig msg -> Model -> CmdMsg -> ( Cmd Msg, List msg )
+convertCmdMsg config model cmd =
+    case cmd of
         Delay backoff msg ->
-            Process.sleep (2000 * backoff)
+            ( Process.sleep (2000 * backoff)
                 |> Task.andThen (\_ -> Task.succeed msg)
                 |> Task.perform (\_ -> NoOp)
+            , []
+            )
 
         SendToJs pmsg ->
-            toSocket pmsg
+            ( Cmd.none, [ config.toSocket pmsg ] )
 
-        BatchMsg [ item ] ->
-            convertCmdMsg toSocket model item
+        SocketClosedCleanly url ->
+            ( Cmd.none, [ config.onClosedDown url ] )
 
         BatchMsg lst ->
-            lst |> List.map (convertCmdMsg toSocket model) |> Cmd.batch
+            let
+                go item ( accCmds, accMgs ) =
+                    convertCmdMsg config model item
+                        |> Tuple.mapFirst (\cmd_ -> cmd_ :: accCmds)
+                        |> Tuple.mapSecond (\msg -> msg ++ accMgs)
+            in
+            List.foldl go ( [], [] ) lst
+                |> Tuple.mapFirst Cmd.batch
+
+        ReportError _ ->
+            ( Cmd.none, [] )
 
         CmdNone ->
-            Cmd.none
-
-
-type Msg
-    = GoodOpen ( String, WebSocket )
-    | BadOpen ( String, String ) -- does not exist
-    | SocketError ( String, Int ) -- url, readyState
-    | SocketClose CloseConfirmation
-    | TryOpen String -- url (callback from sleeping for backoff period)
-    | GoodSend String -- url
-    | BadSend ( String, String )
-    | DecodeError Decode.Error
-    | NoOp
+            ( Cmd.none, [] )
 
 
 update_ : Msg -> Model -> ( Model, CmdMsg )
@@ -206,22 +234,15 @@ update_ msg model =
         BadOpen ( url, error ) ->
             case Dict.get url model.sockets of
                 Just (Opening backoff) ->
-                    let
-                        _ =
-                            Debug.log "BadOpen" error
-                    in
                     addBackoff url backoff
+                        |> (\( m, c ) -> ( m, BatchMsg [ c, ReportError <| "BadOpen" ++ error ] ))
 
                 _ ->
                     -- ignore as user no longer cares about this socket
                     ( model, CmdNone )
 
         SocketError ( url, error ) ->
-            let
-                _ =
-                    Debug.log ("Error " ++ url) error
-            in
-            ( model, CmdNone )
+            ( model, ReportError <| "Error " ++ url ++ ": " ++ String.fromInt error )
 
         SocketClose { url } ->
             case Dict.get url model.sockets of
@@ -229,9 +250,12 @@ update_ msg model =
                     addBackoff url backoff
 
                 Just (Connected _) ->
-                    ( { model | sockets = Dict.insert url (Opening 0) model.sockets }
-                    , SendToJs <| mkOpenMsg url
-                    )
+                    -- TODO add test for closing by user request rather than as a problem
+                    -- reopen connection connection if closed down badly
+                    --                    ( { model | sockets = Dict.insert url (Opening 0) model.sockets }
+                    --                    , SendToJs <| mkOpenMsg url
+                    --                    )
+                    ( { model | sockets = Dict.remove url model.sockets }, SocketClosedCleanly url )
 
                 Nothing ->
                     -- ignoring as user no longer cares about this socket
@@ -243,6 +267,7 @@ update_ msg model =
         GoodSend url ->
             let
                 newModel =
+                    -- head of queue is now known to have been sent Ok
                     { model | queues = Dict.update url (Maybe.andThen List.tail) model.queues }
             in
             ( newModel, mkSendCmd newModel url |> Maybe.map SendToJs |> Maybe.withDefault CmdNone )
@@ -261,22 +286,14 @@ update_ msg model =
                         ( m, SendToJs <| mkOpenMsg url )
 
                     else
-                        let
-                            _ =
-                                Debug.log "BadSend" reason
-                        in
-                        ( model, CmdNone )
+                        ( model, ReportError <| "BadSend: " ++ reason )
 
                 _ ->
                     -- ignore as user no longer cares about this socket
                     ( model, CmdNone )
 
         DecodeError err ->
-            let
-                _ =
-                    Debug.log "decode error" <| Decode.errorToString err
-            in
-            ( model, CmdNone )
+            ( model, ReportError <| Decode.errorToString err )
 
         NoOp ->
             ( model, CmdNone )
@@ -294,22 +311,19 @@ setSockets_ urls model =
                 Nothing ->
                     -- this is a new socket, so we will need to open it
                     ( Dict.insert url (Opening 0) accSockets
-                    , SendToJs (mkOpenMsg <| Debug.log "opening" url) :: accCmds
+                    , SendToJs (mkOpenMsg url) :: accCmds
                     )
 
         ( sockets, addCmds ) =
             List.foldl handleUrl ( Dict.empty, [] ) urls
 
+        closeCmds : List CmdMsg
         closeCmds =
             let
                 go k v acc =
                     case v of
                         Connected socket ->
-                            let
-                                _ =
-                                    Debug.log "closing" k
-                            in
-                            SendToJs (mkCloseMsg socket) :: acc
+                            SendToJs (mkCloseMsg Nothing socket) :: acc
 
                         _ ->
                             -- ideally we want to stop the sleep process
@@ -325,6 +339,16 @@ setSockets_ urls model =
     )
 
 
+closeSocket_ : Maybe String -> String -> Model -> ( Model, CmdMsg )
+closeSocket_ mbUid url model =
+    case Dict.get url model.sockets of
+        Just (Connected socket) ->
+            ( model, SendToJs <| mkCloseMsg mbUid socket )
+
+        _ ->
+            ( model, CmdNone )
+
+
 send_ : String -> String -> Model -> ( Model, CmdMsg )
 send_ url message model =
     let
@@ -334,7 +358,7 @@ send_ url message model =
         newModel =
             addToQueue url message model
     in
-    case Debug.log "send_" <| Dict.get url model.sockets of
+    case Dict.get url model.sockets of
         Just (Connected socket) ->
             if queueLength == 0 then
                 -- as there is nothing in the queue we will try to send immediately
@@ -343,9 +367,11 @@ send_ url message model =
                 )
 
             else
+                -- i.e. add to end of queue
                 ( newModel, CmdNone )
 
         Just (Opening _) ->
+            -- still opening, add to end of queue
             ( newModel, CmdNone )
 
         Nothing ->
@@ -387,9 +413,18 @@ mkOpenMsg url =
     { tag = "open", payload = Encode.string url }
 
 
-mkCloseMsg : Value -> PortMsg
-mkCloseMsg socket =
-    { tag = "close", payload = Encode.object [ ( "socket", socket ) ] }
+mkCloseMsg : Maybe String -> Value -> PortMsg
+mkCloseMsg mbUid socket =
+    let
+        uidPart =
+            case mbUid of
+                Just uid ->
+                    [ ( "uid", Encode.string uid ) ]
+
+                Nothing ->
+                    []
+    in
+    { tag = "close", payload = Encode.object <| ( "socket", socket ) :: uidPart }
 
 
 mkSend : WebSocket -> String -> String -> PortMsg
@@ -409,12 +444,12 @@ mkSend socket url message =
 
 
 convertIncomingMsg : PortMsg -> Msg
-convertIncomingMsg ({ tag, payload } as pmsg) =
+convertIncomingMsg { tag, payload } =
     let
         handler dec msg =
             Decode.decodeValue dec payload
                 |> Result.map msg
-                |> recover DecodeError
+                |> extract DecodeError
     in
     case tag of
         "GoodOpen" ->
@@ -436,11 +471,7 @@ convertIncomingMsg ({ tag, payload } as pmsg) =
             handler decodeError SocketError
 
         _ ->
-            let
-                _ =
-                    Debug.log "convertIncomingMsg" tag
-            in
-            Debug.todo (Encode.encode 0 payload)
+            handler (Decode.fail <| "convertIncomingMsg did not recognise " ++ tag) (\_ -> NoOp)
 
 
 decodeGoodOpen : Decoder ( String, WebSocket )
@@ -483,11 +514,11 @@ decodeUrl =
 
 
 
---
+-- == Result.Extra
 
 
-recover : (a -> b) -> Result a b -> b
-recover fn res =
+extract : (a -> b) -> Result a b -> b
+extract fn res =
     case res of
         Ok b ->
             b

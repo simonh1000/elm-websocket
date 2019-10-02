@@ -1,9 +1,9 @@
 {
     "type": "package",
-    "name": "simonh1000/websocket",
-    "summary": "....",
+    "name": "simonh1000/elm-websocket",
+    "summary": "An example library for using websockets with Elm",
     "license": "BSD-3-Clause",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "exposed-modules": [
         "WebSocket"
     ],

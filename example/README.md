@@ -1,4 +1,4 @@
-# https://github.com/simonh1000/elm-webpack-starter
+# Based on [elm-webpack-starter](https://github.com/simonh1000/elm-webpack-starter)
 
 ## Installation
 
