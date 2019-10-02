@@ -4,7 +4,7 @@ Aim: to reproduce as closely as possible the API of the 0.18 library.
 
 Because of the need to use Ports, the amount of boilerplate is much higher. Beyond the boiler plate the only real difference is that you have declare your socket listeners as a Dict rather than calling `listen` multiple times.
 
-## Installation
+## Installation (See the example for full details of what needs to be done)
 
 1) Define ports and use these to create the required Config 
 
